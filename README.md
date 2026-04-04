@@ -2,92 +2,109 @@
 
 **Live bidirectional Telegram voice calls with a fully local AI — no cloud, no API keys, no internet.**
 
-XTTS-v2 + Whisper Large-v3 + ntgcalls · Windows x86_64 · RTX 3070 tested
+XTTS-v2 · Whisper Large-v3 · ntgcalls v2.1.0 native P2P API · Windows x86_64
 
 ---
 
 ## What this is
 
-This is a proof of concept showing something nobody has published before:
+A proof of concept showing something nobody has published before:
 
-> A local AI (voice-cloned, running entirely on your GPU) that **picks up real Telegram calls**, listens to you in real time, understands what you say via Whisper, processes it through a local AI pipeline, and responds back in a cloned voice — **live, bidirectional, no cloud involved**.
+> A local AI — voice-cloned, running entirely on your GPU — that **picks up real Telegram 1-on-1 calls**, listens in real time, understands speech via Whisper, processes it through a local pipeline, and responds back in a cloned voice. **Live. Bidirectional. No cloud.**
 
 The caller experience: you dial a regular Telegram number. The AI answers, listens, thinks, and talks back — in real time.
 
-Built as the voice interface for **[AriNet](https://github.com/TxPKev/AriNet_deterministicAI)**, a fully deterministic, 100% offline AI assistant system.
+Built as the voice interface layer for **[AriNet](https://github.com/TxPKev/AriNet_deterministicAI)**, a fully deterministic, 100% offline AI assistant.
 
 ---
 
-## Why this matters
+## Why this is genuinely novel
 
-### The gap in the ecosystem
+After exhaustive research across GitHub, PyPI, Reddit, Hacker News, and developer blogs, **zero public projects combine all four layers**:
 
-| What exists | What was missing |
+| Layer | Prior art | Status |
+|---|---|---|
+| Telegram voice messages (async) | Many bots (Whisper + Coqui + LLM) | ✓ solved |
+| Discord voice AI (bidirectional) | Discord-VC-LLM, Discord-Local-LLM-VoiceChat-Bot | ✓ solved for Discord |
+| Telegram group call raw PCM | MarshalX/tgcalls (2021, dead) | ✓ worked, dead |
+| **Telegram private call + raw PCM + local AI** | **Nobody** | **← this repo** |
+
+The specific gap: `py-tgcalls` (the active high-level wrapper) does not expose private 1-on-1 calls or raw PCM callbacks in its stable release. `ntgcalls` v2.1.0 has the full P2P API at the C++ / native Python binding level — but no one has published a working example connecting it to a real AI pipeline.
+
+This is that example.
+
+---
+
+## Honest status
+
+| Component | Status |
 |---|---|
-| Telegram bots that send voice messages (pre-recorded OGG) | **Live call answering with a real AI** |
-| VB-Cable workarounds (route desktop audio into call) | **Programmatic raw PCM in/out via ntgcalls** |
-| XTTS demos in Jupyter notebooks | **XTTS streaming into a live phone call** |
-| Whisper transcription from files | **Whisper doing real-time VAD + transcription from call audio** |
-| pytgcalls for music bots | **pytgcalls for private 1-on-1 calls with raw PCM** |
+| ntgcalls v2.1.0 P2P API (`create_p2p_call`, `connect_p2p`, `send_external_frame`, `on_frame`) | **Confirmed in C++ source and Go bindings** |
+| Python binding signatures (pybind11 snake_case) | **Inferred from C++/Go — no .pyi stubs ship with the package** |
+| Telethon signaling (DH exchange, AcceptCallRequest) | **Confirmed — matches MTProto spec** |
+| `_build_rtc_servers()` — PhoneCall → ntgcalls RTCServer | **Inferred — field names match Telegram TL schema** |
+| XTTS `inference_stream()` → 48kHz call audio | **Confirmed, ~200ms first chunk on RTX 3070** |
+| Whisper Large-v3 via faster-whisper | **Confirmed, production-tested** |
 
-No public repository combines XTTS-v2 + pytgcalls/ntgcalls + Whisper for live private calls. This is that repository.
+**This is a PoC, not a finished product.** The Python API of ntgcalls is not officially documented. The code is built from the C++ source, Go bindings, and the Telegram TL schema. Run `pip install ntgcalls==2.1.0 --no-deps` and inspect with `dir(ntgcalls.NTgCalls())` to verify method names on your system before running.
 
 ---
 
 ## Architecture
 
 ```
-Caller dials Ari's Telegram number
+Caller dials Ari's Telegram number (private 1-on-1 call)
     │
     ▼
-Telethon UserClient
-UpdatePhoneCall event → auto-accept
+Telethon UserClient — MTProto signaling layer
+  UpdatePhoneCall → PhoneCallRequested
+  → GetDhConfigRequest → compute g_b
+  → AcceptCallRequest (DH exchange)
+  → PhoneCall arrives (caller confirmed)
     │
     ▼
-ntgcalls / pytgcalls GroupCallRaw
-    ├─► Inbound PCM (48kHz, 16-bit, mono)
-    │       │
-    │       ▼
-    │   SimpleVAD (energy-based)
-    │   accumulates chunks until silence detected
-    │       │
-    │       ▼
-    │   Whisper Large-v3 (faster-whisper, int8, CUDA)
-    │   resample 48kHz → 16kHz → transcribe
-    │       │
-    │       ▼
-    │   AriNet Pipeline (or your AI pipeline)
-    │   text in → response text out
-    │       │
-    │       ▼
-    │   XTTS-v2 inference_stream()
-    │   first audio chunk in ~200ms (RTX 3070)
-    │   output: 24kHz float32 chunks
-    │       │
-    │       ▼
-    │   Resample 24kHz → 48kHz
-    │   push to outbound queue
+ntgcalls v2.1.0 — WebRTC/SRTP transport (native C++)
+  create_p2p_call()
+  init_exchange() + exchange_keys() — finalise DH
+  set_stream_sources(MediaSource.EXTERNAL) — raw PCM mode
+  connect_p2p(RTCServer list from PhoneCall endpoints)
     │
-    └─► Outbound PCM (48kHz, 16-bit, mono)
-        ntgcalls pulls from queue every 20ms
-        caller hears the AI response in real time
+    ├─► on_frame() callback — inbound PCM from caller
+    │       48kHz int16 → float32
+    │       → SimpleVAD (energy-based, replaceable with silero-vad)
+    │       → Whisper Large-v3 (resampled to 16kHz)
+    │       → AriNet pipeline / your AI
+    │       → XTTS-v2 inference_stream() → 24kHz chunks
+    │       → resample 48kHz → push to OutboundAudioLoop
+    │
+    └─► send_external_frame() — outbound PCM to caller
+            OutboundAudioLoop pulls from queue
+            pushes 20ms frames (960 samples @ 48kHz) at exact 20ms pacing
 ```
 
 ---
 
-## Hardware & Software Requirements
+## Why Telethon alone is not enough
 
-**Tested on:**
+Telegram voice call **audio is WebRTC/SRTP — peer-to-peer between clients**. Telethon handles only the MTProto signaling (call accept, DH key exchange, connection endpoints). The audio packets never go through MTProto. To send and receive audio you need a WebRTC stack. `ntgcalls` IS that WebRTC stack. There is no shortcut.
+
+This also means approaches like "intercept the SRTP stream directly with Python" require implementing SRTP decryption + WebRTC state machine yourself — ntgcalls already does this correctly in C++.
+
+---
+
+## Hardware & Software
+
+**Tested configuration:**
 - Windows 11 x86_64
-- ASUS ZenBook Pro Duo, NVIDIA RTX 3070 8GB VRAM
+- NVIDIA RTX 3070 8GB VRAM
 - Python 3.11, CUDA 12.1, torch 2.5.1+cu121
 
 **Minimum recommended:**
-- NVIDIA GPU with 6GB+ VRAM (for XTTS-v2 + Whisper simultaneously)
-- Python 3.10+
-- Windows 10/11 x86_64 (ntgcalls ships prebuilt Windows wheels)
+- NVIDIA GPU with 6GB+ VRAM (XTTS-v2 ~3GB + Whisper large-v3 ~3GB)
+- Python 3.10 or 3.11 (3.13 confirmed to have ntgcalls wheels on PyPI)
+- Windows 10/11 x86_64
 
-**Linux:** ntgcalls has Linux support but is primarily tested on Windows. PRs welcome.
+**Linux:** ntgcalls has Linux support. Full stack not tested on Linux — PRs welcome.
 
 ---
 
@@ -100,135 +117,176 @@ git clone https://github.com/TxPKev/ari-telegram-voice.git
 cd ari-telegram-voice
 ```
 
-### 2. Install dependencies
+### 2. Install PyTorch first
 
 ```bash
-# Install PyTorch with CUDA first (prevents pip from downgrading it later)
+# ALWAYS install torch before everything else.
+# This prevents any other package from silently downgrading it to CPU.
 pip install torch==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
-
-# Install everything else
-pip install "pytgcalls[telethon]" faster-whisper TTS numpy scipy cryptg
 ```
 
-> **Warning:** Never run `pip install llama-cpp-python` or other packages without `--no-deps` in the same environment — it can silently downgrade PyTorch to the CPU version and break CUDA.
+### 3. Install ntgcalls
 
-### 3. Get Telegram API credentials
+```bash
+# --no-deps is MANDATORY.
+# ntgcalls lists dependencies that would overwrite your torch CUDA build.
+pip install ntgcalls==2.1.0 --no-deps
+```
+
+### 4. Verify the P2P API is available
+
+```python
+import ntgcalls
+obj = ntgcalls.NTgCalls()
+print([m for m in dir(obj) if not m.startswith('_')])
+# Look for: create_p2p_call, connect_p2p, send_external_frame, on_frame, set_stream_sources
+```
+
+If `create_p2p_call` is not in the list, the wheel for your Python version may be an older build. Try Python 3.13 or build from source.
+
+### 5. Install remaining dependencies
+
+```bash
+pip install "Telethon>=1.36.0" faster-whisper TTS numpy scipy cryptg --no-deps
+```
+
+### 6. Get Telegram API credentials
 
 1. Go to [my.telegram.org/apps](https://my.telegram.org/apps)
-2. Create an app — get your `api_id` and `api_hash`
+2. Create an app → get `api_id` and `api_hash`
+3. The account running this script must be a **user account** (not a bot). Ari needs her own Telegram number.
 
-### 4. Configure
+### 7. Configure
 
 ```bash
 cp config.example.json config.json
-# Edit config.json with your api_id, api_hash, phone number
+# Edit config.json — api_id, api_hash, phone number
 ```
 
-**`config.json` is in `.gitignore` — never commit it.**
+`config.json` is in `.gitignore`. Never commit it.
 
-### 5. Add a voice sample (optional but recommended)
+### 8. Add voice sample (optional but recommended)
 
-Put a clean WAV file (5–30 seconds, 22kHz or higher, minimal background noise) of the target voice in:
 ```
-voice/ari_voice_sample.wav
+voice/ari_voice_sample.wav   — 5–30s, clean speech, 22kHz+
 ```
 
 Point `config.json` → `speaker_wav` to this path. XTTS-v2 clones the voice on first load.
 
-### 6. Run
+### 9. Run
 
 ```bash
 python ari_voice_call.py
 ```
 
-First run: Telethon asks for your phone number and a verification code (one-time auth).  
-After that: the session is saved locally and Ari stays online.
+First run: Telethon asks for phone + verification code (one-time). After that, the session is saved locally.
 
 ---
 
-## Integrating your own AI pipeline
+## Integrating your AI pipeline
 
-The `AriPipeline` class in `ari_voice_call.py` is a stub:
+Replace the stub in `AriPipeline.process()`:
 
 ```python
 class AriPipeline:
     def process(self, text: str) -> str:
-        # Replace with your actual pipeline
-        return f"Ich habe verstanden: {text}"
+        # Your pipeline here:
+        # from core.pipeline import run_pipeline
+        # return run_pipeline(text)
+        return f"Ich habe verstanden: {text}"   # stub
 ```
 
-Replace the body of `process()` with a call to your local LLM pipeline, rule engine, or whatever logic you want to run. The rest of the call handling, VAD, STT, TTS, and audio streaming is already wired up.
-
----
-
-## How it compares to the VB-Cable approach
-
-| | VB-Cable (Weg 2) | ntgcalls (this repo) |
-|---|---|---|
-| **Works today** | ✓ | ✓ (with this code) |
-| **Requires Telegram Desktop** | ✓ | ✗ — runs headless |
-| **Programmatic control** | ✗ | ✓ |
-| **Works on a server** | ✗ | ✓ |
-| **Auto-answers calls** | ✗ manual | ✓ fully automatic |
-| **Custom audio processing** | Limited | Full raw PCM access |
-| **Latency** | Depends on Telegram Desktop | ~200ms first TTS chunk |
-
-The VB-Cable approach (routing desktop audio through a virtual cable into Telegram Desktop) works and is a valid workaround. This repository solves the underlying problem properly: programmatic raw PCM in/out, automatic call answering, no GUI required.
+Everything else — call handling, DH exchange, VAD, STT, TTS, audio loop — is wired up.
 
 ---
 
 ## Key technical details
 
-### ntgcalls vs old pytgcalls
+### ntgcalls v2.1.0 P2P call flow
 
-Old `pytgcalls` (v0.x) only supported group calls. `ntgcalls` (wrapped by `pytgcalls` v2+) adds:
-- Private 1-on-1 call support
-- Raw PCM in/out (`GroupCallRaw` equivalent)
-- Prebuilt Windows x86_64 wheels — no compilation needed
-- Active maintenance (2025)
+ntgcalls v2.1.0 (released February 5, 2026) has two separate call creation paths. Group calls use `create_call(chat_id)`. Private calls use `create_p2p_call(chat_id)` followed by:
+
+```
+init_exchange(chat_id, dh_config, g_a_hash)
+exchange_keys(chat_id, g_a_or_b, fingerprint)
+connect_p2p(chat_id, rtc_servers, library_versions, p2p_allowed)
+```
+
+This matches the Telegram MTProto `PhoneCallProtocol` and `PhoneConnection` types exactly.
+
+### Raw PCM mode
+
+Setting `MediaSource.EXTERNAL` in `set_stream_sources()` enables raw byte access:
+- **Outbound:** `send_external_frame(chat_id, StreamDevice.MICROPHONE, pcm_bytes, FrameData(...))`
+- **Inbound:** `on_frame()` callback delivers `Frame` objects with raw PCM data
+
+Frame format: PCM 16-bit signed little-endian, 48000 Hz, mono, 960 samples (20ms).
 
 ### XTTS-v2 streaming
 
-`inference_stream()` is the key. Instead of waiting for the full audio to be synthesised (3–8 seconds for a long sentence), it yields PCM chunks as they are generated. First chunk in ~200ms on an RTX 3070. This makes real-time voice feel natural rather than robotic.
+`inference_stream()` yields audio chunks as they are generated. First chunk in ~200ms on RTX 3070. This makes the call feel natural — Ari starts talking before the full response is synthesised.
 
-### VAD design
-
-This PoC uses a simple energy-based VAD (RMS threshold in dB). It works well in quiet environments. For production use, replace with `silero-vad` or `webrtcvad` for better noise robustness.
-
-### Audio pipeline
+### Audio resampling chain
 
 ```
-ntgcalls in:  48kHz, int16, mono
-Whisper in:   16kHz, float32, mono  →  resample with scipy.signal.resample_poly
-XTTS out:     24kHz, float32, mono  →  resample to 48kHz
-ntgcalls out: 48kHz, int16, mono
+ntgcalls in:    48kHz int16 mono
+Whisper in:     16kHz float32 mono   →  resample via scipy.signal.resample_poly
+XTTS out:       24kHz float32 mono   →  resample to 48kHz
+ntgcalls out:   48kHz int16 mono
 ```
 
-Resampling uses `scipy.signal.resample_poly` (polyphase filter, high quality, fast).
+### Frame pacing
+
+WebRTC expects exactly one 20ms frame (960 samples @ 48kHz) every 20ms. `OutboundAudioLoop` maintains this timing with `time.perf_counter()` to prevent jitter.
 
 ---
 
-## Project context
+## VB-Cable vs ntgcalls
 
-This repository is a public PoC extracted from **AriNet** — a fully deterministic, 100% offline AI assistant system built by NovaMind Studios.
+| | VB-Cable (workaround) | ntgcalls (this repo) |
+|---|---|---|
+| Requires Telegram Desktop running | ✓ | ✗ — headless |
+| Programmatic audio control | ✗ | ✓ full raw PCM |
+| Auto-answers calls | ✗ manual | ✓ fully automatic |
+| Works on a server / headless | ✗ | ✓ |
+| Stable API | ✓ | PoC — see honest status above |
 
-AriNet features:
-- No cloud. No API keys. No internet dependency.
-- Voice-cloned local AI with own Telegram number
-- Deterministic pipeline (seed-controlled, reproducible)
-- Guardian Framework (patent-pending) for device state evaluation
+The VB-Cable approach (routing desktop audio through a virtual cable into Telegram Desktop) works today and is a valid production shortcut. This repository solves the underlying problem at the proper level.
 
-This repository isolates only the Telegram voice call integration as a standalone, reproducible PoC so others can build on it.
+---
+
+## Known risks and open questions
+
+1. **ntgcalls Python binding names** — pybind11 generates snake_case from C++ but no `.pyi` stubs ship. Run the `dir()` check above before assuming method names.
+2. **Frame pacing jitter** — `OutboundAudioLoop` uses `time.perf_counter()`. On Windows, timer resolution is ~0.5ms — adequate for 20ms frames.
+3. **RTCServer field mapping** — `PhoneConnection` fields (`ip`, `ipv6`, `port`, `username`, `password`) are mapped to `ntgcalls.RTCServer`. Field names inferred from TL schema — verify if connection fails.
+4. **VRAM budget** — XTTS-v2 (~3GB) + Whisper large-v3 (~3GB) = ~6GB. On 8GB VRAM leave ≥1GB headroom. Load models before the call starts to avoid cold-start delays.
+5. **VAD quality** — Energy-based VAD is simple but fragile in noisy environments. Replace with [silero-vad](https://github.com/snakers4/silero-vad) for production use.
 
 ---
 
 ## Contributing
 
-Issues and PRs welcome. Especially interested in:
-- Linux compatibility improvements
-- Silero-VAD integration (replace energy-based VAD)
-- Group call support (currently only private 1-on-1 calls)
+Issues and PRs welcome. Priority areas:
+
+- Verified `ntgcalls.NTgCalls()` method signatures (`.pyi` stubs)
+- `RTCServer` field name confirmation from live call
+- Linux compatibility
+- silero-vad integration
 - Latency measurements from other GPU configs
+
+---
+
+## Project context
+
+Extracted from **[AriNet](https://github.com/TxPKev/AriNet_deterministicAI)** — a fully deterministic, 100% offline AI assistant:
+
+- No cloud, no API keys, no internet dependency
+- Voice-cloned local AI with its own Telegram number
+- Deterministic pipeline (seed-controlled, reproducible)
+- Guardian Framework (patent-pending) for device state evaluation
+
+This repo isolates only the Telegram voice call transport as a standalone, reproducible PoC.
 
 ---
 
@@ -240,7 +298,6 @@ MIT — see [LICENSE](LICENSE)
 
 ## Author
 
-**Kevin Kachramanow** — NovaMind Studios  
-25 years CNC engineering · software architect · offline-first AI systems  
-GitHub: [TxPKev](https://github.com/TxPKev)  
-Location: Gösgen, Kanton Solothurn, Switzerland
+**Kevin Kachramanow** — NovaMind Studios
+25 years CNC engineering · software architect · offline-first AI systems
+[github.com/TxPKev](https://github.com/TxPKev) · Gösgen, Kanton Solothurn, Switzerland

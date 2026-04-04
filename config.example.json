@@ -1,0 +1,14 @@
+{
+  "_comment": "Copy this file to config.json and fill in your values. NEVER commit config.json!",
+
+  "api_id":       123456,
+  "api_hash":     "your_telegram_api_hash_here",
+  "phone":        "+41791234567",
+  "session_name": "ari_session",
+
+  "whisper_model": "large-v3",
+  "device":        "cuda",
+
+  "speaker_wav":   "voice/ari_voice_sample.wav",
+  "language":      "de"
+}

@@ -1,0 +1,47 @@
+# Credentials & sessions — NEVER commit these
+config.json
+*.session
+*.session-journal
+*.env
+
+# Voice samples — may contain biometric data
+voice/
+*.wav
+*.ogg
+*.mp3
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+venv/
+.venv/
+env/
+.env/
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# XTTS / Whisper model cache
+~/.local/share/tts/
+~/.cache/whisper/
+models/
+
+# Logs
+*.log
+logs/

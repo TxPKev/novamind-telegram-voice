@@ -39,7 +39,7 @@ This is that example.
 
 | Component | Status |
 |---|---|
-| ntgcalls v2.1.0 P2P API (`create_p2p_call`, `connect_p2p`, `send_external_frame`, `on_frame`) | **Confirmed in C++ source and Go bindings** |
+| ntgcalls v2.1.0 P2P API (`create_p2p_call`, `connect_p2p`, `send_external_frame`, `on_frames`) | **Confirmed in C++ source and Go bindings** |
 | Python binding signatures (pybind11 snake_case) | **Inferred from C++/Go — no .pyi stubs ship with the package** |
 | Telethon signaling (DH exchange, AcceptCallRequest) | **Confirmed — matches MTProto spec** |
 | `_build_rtc_servers()` — PhoneCall → ntgcalls RTCServer | **Inferred — field names match Telegram TL schema** |
@@ -69,7 +69,7 @@ ntgcalls v2.1.0 — WebRTC/SRTP transport (native C++)
   set_stream_sources(MediaSource.EXTERNAL) — raw PCM mode
   connect_p2p(RTCServer list from PhoneCall endpoints)
     │
-    ├─► on_frame() callback — inbound PCM from caller
+    ├─► on_frames() callback — inbound PCM from caller
     │       48kHz int16 → float32
     │       → SimpleVAD (energy-based, replaceable with silero-vad)
     │       → Whisper Large-v3 (resampled to 16kHz)
@@ -79,7 +79,7 @@ ntgcalls v2.1.0 — WebRTC/SRTP transport (native C++)
     │
     └─► send_external_frame() — outbound PCM to caller
             OutboundAudioLoop pulls from queue
-            pushes 20ms frames (960 samples @ 48kHz) at exact 20ms pacing
+            pushes 10ms frames (960 bytes @ 48kHz) at exact 10ms pacing
 ```
 
 ---
@@ -139,7 +139,7 @@ pip install ntgcalls==2.1.0 --no-deps
 import ntgcalls
 obj = ntgcalls.NTgCalls()
 print([m for m in dir(obj) if not m.startswith('_')])
-# Look for: create_p2p_call, connect_p2p, send_external_frame, on_frame, set_stream_sources
+# Look for: create_p2p_call, connect_p2p, send_external_frame, on_frames, set_stream_sources
 ```
 
 If `create_p2p_call` is not in the list, the wheel for your Python version may be an older build. Try Python 3.13 or build from source.
@@ -218,9 +218,9 @@ This matches the Telegram MTProto `PhoneCallProtocol` and `PhoneConnection` type
 
 Setting `MediaSource.EXTERNAL` in `set_stream_sources()` enables raw byte access:
 - **Outbound:** `send_external_frame(chat_id, StreamDevice.MICROPHONE, pcm_bytes, FrameData(...))`
-- **Inbound:** `on_frame()` callback delivers `Frame` objects with raw PCM data
+- **Inbound:** `on_frames()` callback delivers `Frame` objects with raw PCM data
 
-Frame format: PCM 16-bit signed little-endian, 48000 Hz, mono, 960 samples (20ms).
+Frame format: PCM 16-bit signed little-endian, 48000 Hz, mono, 960 bytes = 480 samples (10ms).
 
 ### XTTS-v2 streaming
 
@@ -237,7 +237,7 @@ ntgcalls out:   48kHz int16 mono
 
 ### Frame pacing
 
-WebRTC expects exactly one 20ms frame (960 samples @ 48kHz) every 20ms. `OutboundAudioLoop` maintains this timing with `time.perf_counter()` to prevent jitter.
+WebRTC expects exactly one 10ms frame (960 bytes = 480 int16 samples @ 48kHz) every 10ms. `OutboundAudioLoop` maintains this timing with `time.perf_counter()` to prevent jitter.
 
 ---
 
@@ -258,7 +258,7 @@ The VB-Cable approach (routing desktop audio through a virtual cable into Telegr
 ## Known risks and open questions
 
 1. **ntgcalls Python binding names** — pybind11 generates snake_case from C++ but no `.pyi` stubs ship. Run the `dir()` check above before assuming method names.
-2. **Frame pacing jitter** — `OutboundAudioLoop` uses `time.perf_counter()`. On Windows, timer resolution is ~0.5ms — adequate for 20ms frames.
+2. **Frame pacing jitter** — `OutboundAudioLoop` uses `time.perf_counter()`. On Windows, timer resolution is ~0.5ms — adequate for 10ms frames.
 3. **RTCServer field mapping** — `PhoneConnection` fields (`ip`, `ipv6`, `port`, `username`, `password`) are mapped to `ntgcalls.RTCServer`. Field names inferred from TL schema — verify if connection fails.
 4. **VRAM budget** — XTTS-v2 (~3GB) + Whisper large-v3 (~3GB) = ~6GB. On 8GB VRAM leave ≥1GB headroom. Load models before the call starts to avoid cold-start delays.
 5. **VAD quality** — Energy-based VAD is simple but fragile in noisy environments. Replace with [silero-vad](https://github.com/snakers4/silero-vad) for production use.

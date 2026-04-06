@@ -292,7 +292,6 @@ This repo isolates only the Telegram voice call transport as a standalone, repro
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
 
 ---
 

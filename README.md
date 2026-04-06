@@ -39,7 +39,7 @@ This is that example.
 
 | Component | Status |
 |---|---|
-| ntgcalls v2.1.0 P2P API (`create_p2p_call`, `connect_p2p`, `send_external_frame`, `on_frames`) | **Confirmed in C++ source and Go bindings** |
+| ntgcalls v2.1.0 P2P API (`create_p2p_call`, `connect_p2p`, `send_external_frame`, `on_frames`) | ✅ **Confirmed — live tested, bidirectional working** |
 | Python binding signatures (pybind11 snake_case) | **Inferred from C++/Go — no .pyi stubs ship with the package** |
 | Telethon signaling (DH exchange, AcceptCallRequest) | **Confirmed — matches MTProto spec** |
 | `_build_rtc_servers()` — PhoneCall → ntgcalls RTCServer | **Inferred — field names match Telegram TL schema** |

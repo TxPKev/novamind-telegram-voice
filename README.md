@@ -292,7 +292,7 @@ This repo isolates only the Telegram voice call transport as a standalone, repro
 
 ## License
 
-
+ GNU AFFERO GENERAL PUBLIC LICENSE 3.0
 ---
 
 ## Author

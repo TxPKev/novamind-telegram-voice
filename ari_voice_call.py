@@ -1,5 +1,5 @@
 """
-ari_voice_call.py — AriNet Telegram Voice Call Handler
+nova_voice_call.py — AriNet Telegram Voice Call Handler
 =======================================================
 XTTS-v2 + Whisper Large-v3 + ntgcalls native P2P API
 Live bidirectional Telegram private call, 100% offline, no cloud, no API keys.

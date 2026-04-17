@@ -1,4 +1,4 @@
-# novamind-telegram-voice
+# telegram-voice
 
 Bidirectional voice bridge between Telegram (MTProto) and local audio pipelines.
 

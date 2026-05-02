@@ -4,11 +4,11 @@
   "api_id":       123456,
   "api_hash":     "your_telegram_api_hash_here",
   "phone":        "+41791234567",
-  "session_name": "ari_session",
+  "session_name": "voice_session",
 
   "whisper_model": "large-v3",
   "device":        "cuda",
 
-  "speaker_wav":   "voice/ari_voice_sample.wav",
+  "speaker_wav":   "your_speaker_sample.wav",
   "language":      "de"
 }

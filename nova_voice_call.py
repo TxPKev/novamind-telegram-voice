@@ -1,5 +1,4 @@
 """
-"""
 nova_voice_call.py — Telegram P2P Voice Call Handler
 =====================================================
 XTTS-v2 + Whisper Large-v3 + ntgcalls native P2P API
@@ -12,11 +11,11 @@ py-tgcalls (the high-level wrapper) does NOT expose private calls or raw PCM
 callbacks for 1-on-1 calls in its stable release. We bypass it entirely.
 
 Audio path:
-  Inbound:  ntgcalls on_frame() callback -> 48kHz int16 PCM bytes
+  Inbound:  ntgcalls on_frames() callback -> 48kHz int16 PCM bytes
             -> float32 -> VAD -> Whisper (16kHz) -> pipeline -> response text
   Outbound: XTTS inference_stream() -> 24kHz float32
             -> resample 48kHz -> int16 PCM bytes
-            -> ntgcalls send_external_frame() every 20ms
+            -> ntgcalls send_external_frame() every 10ms
 
 Signaling path (MTProto, via Telethon):
   UpdatePhoneCall / PhoneCallRequested
@@ -47,14 +46,18 @@ Python API note:
     exchange_keys()       - finalise key exchange, get fingerprint
     connect_p2p()         - connect to TURN/STUN servers from PhoneCall object
     set_stream_sources()  - configure raw PCM mode (MediaSource.EXTERNAL)
-    send_external_frame() - push outbound PCM frame (20ms / 960 samples @ 48kHz)
-    on_frames()           - register callback for inbound PCM frames
+                            CAPTURE  = outbound (microphone)
+                            PLAYBACK = inbound  (speaker = caller's voice)
+                            TWO separate calls required, one per direction.
+    send_external_frame() - push outbound PCM frame (10ms / 480 samples @ 48kHz)
+    on_frames             - register callback for inbound PCM frames
+                            Signature: (uid, mode, device, frames: list)
     send_signaling_data() - relay WebRTC signaling data to remote peer
-    on_signal()           - register callback for inbound signaling data
+    on_signal             - register callback for inbound signaling data
 
 Frame format (matches Telegram/WebRTC standard):
   PCM 16-bit signed little-endian, 48000 Hz, mono
-  Frame size: 960 samples = 20ms
+  Frame size: 480 samples = 10ms (NOT 20ms — verified in ntgcalls C++ source)
 
 License: AGPL-3.0
 """
@@ -137,11 +140,13 @@ log = logging.getLogger("VoiceCall")
 # CONSTANTS
 # -----------------------------------------------------------------------------
 
-# ntgcalls / Telegram WebRTC standard
+# ntgcalls 2.1.0 / Telegram WebRTC standard
+# AudioSink.frameTime() = 10ms — verified in ntgcalls C++ source.
+# 20ms is a common misconception that breaks send_external_frame().
 CALL_SAMPLE_RATE   = 48_000    # Hz
 CALL_CHANNELS      = 1         # mono
-CALL_FRAME_SAMPLES = 960       # 20ms @ 48kHz
-CALL_FRAME_BYTES   = CALL_FRAME_SAMPLES * 2  # int16 = 2 bytes/sample
+CALL_FRAME_SAMPLES = 480       # 10ms @ 48kHz
+CALL_FRAME_BYTES   = CALL_FRAME_SAMPLES * 2  # int16 LE = 960 bytes
 
 WHISPER_SAMPLE_RATE = 16_000   # Whisper expects 16kHz
 XTTS_SAMPLE_RATE    = 24_000   # XTTS-v2 native output
@@ -408,11 +413,12 @@ class EchoPipeline:
 class OutboundAudioLoop:
     """
     Runs in a background thread.
-    Pulls 20ms frames from the queue and pushes them via
-    ntgcalls send_external_frame() at the correct 20ms pacing.
+    Pulls 10ms frames from the queue and pushes them via
+    ntgcalls send_external_frame() at the correct 10ms pacing.
+    Drift-corrected via busy-wait on the last 1ms (Windows time.sleep resolution).
     """
 
-    FRAME_INTERVAL = CALL_FRAME_SAMPLES / CALL_SAMPLE_RATE  # 0.020s
+    FRAME_INTERVAL = CALL_FRAME_SAMPLES / CALL_SAMPLE_RATE  # 0.010s
 
     def __init__(self, ntg: "ntgcalls.NTgCalls", chat_id: int):
         self._ntg     = ntg
@@ -428,7 +434,7 @@ class OutboundAudioLoop:
         self._stop.set()
 
     def push_audio(self, audio_48k: np.ndarray):
-        """Enqueue float32 audio (48kHz) as 20ms PCM frames."""
+        """Enqueue float32 audio (48kHz) as 10ms PCM frames."""
         total  = len(audio_48k)
         offset = 0
         while offset < total:
@@ -451,7 +457,12 @@ class OutboundAudioLoop:
         while not self._stop.is_set():
             now = time.perf_counter()
             if now < next_tick:
-                time.sleep(next_tick - now)
+                slack = next_tick - now
+                if slack > 0.001:
+                    time.sleep(slack - 0.001)
+                # busy-wait the last 1ms — Windows time.sleep() resolution
+                while time.perf_counter() < next_tick:
+                    pass
             next_tick += self.FRAME_INTERVAL
 
             try:
@@ -529,7 +540,7 @@ class CallSession:
             log.warning("[SESSION] stop error: %s", e)
 
     def on_inbound_frame(self, frame):
-        """Called by ntgcalls on_frame() callback - runs in ntgcalls audio thread."""
+        """Called per frame from the global on_frames callback (PLAYBACK only)."""
         raw_bytes = bytes(frame.data)
         chunk     = pcm_bytes_to_float32(raw_bytes)
         utterance = self._vad.feed(chunk)
@@ -589,8 +600,10 @@ class CallHandler:
         self._tts      = None
         self._pipeline = EchoPipeline()
 
-        # Active sessions keyed by call_id
+        # Active sessions keyed by peer_id (= chat_id in ntgcalls P2P)
         self._sessions: dict[int, CallSession] = {}
+        # Reverse lookup: call_id -> peer_id (for PhoneCallDiscarded routing)
+        self._call_id_to_peer: dict[int, int] = {}
 
         import concurrent.futures
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
@@ -626,13 +639,21 @@ class CallHandler:
     def _register_ntgcalls_callbacks(self):
         """Register ntgcalls-level callbacks that apply to all calls."""
 
-        @self._ntg.on_frame()
-        def _on_frame(chat_id: int, frame):
-            session = self._sessions.get(chat_id)
-            if session:
+        @self._ntg.on_frames
+        def _on_frames(uid: int,
+                       mode: ntgcalls.StreamMode,
+                       device: ntgcalls.StreamDevice,
+                       frames: list):
+            # PLAYBACK = inbound (caller's voice). CAPTURE never fires here.
+            if mode != ntgcalls.StreamMode.PLAYBACK:
+                return
+            session = self._sessions.get(uid)
+            if session is None:
+                return
+            for frame in frames:
                 session.on_inbound_frame(frame)
 
-        @self._ntg.on_signal()
+        @self._ntg.on_signal
         def _on_signal(chat_id: int, data: bytes):
             # Relay signaling data back to remote peer via Telethon
             session = self._sessions.get(chat_id)
@@ -672,9 +693,11 @@ class CallHandler:
 
         elif isinstance(call, PhoneCallDiscarded):
             log.info("[CALL] Discarded: id=%s reason=%s", call.id, call.reason)
-            session = self._sessions.pop(call.id, None)
-            if session:
-                session.stop()
+            peer_id = self._call_id_to_peer.pop(call.id, None)
+            if peer_id is not None:
+                session = self._sessions.pop(peer_id, None)
+                if session:
+                    session.stop()
 
     async def _accept(self, call_req: PhoneCallRequested):
         """DH exchange + AcceptCallRequest."""
@@ -689,7 +712,9 @@ class CallHandler:
                 self._stt, self._tts, self._pipeline, self._executor,
             )
             session.store_dh(b, dh_config)
-            self._sessions[call_req.id] = session
+            # Index by peer_id (= chat_id in ntgcalls)
+            self._sessions[session.peer_id] = session
+            self._call_id_to_peer[call_req.id] = session.peer_id
 
             # Step 3: AcceptCallRequest
             result = await self.client(AcceptCallRequest(
@@ -707,16 +732,22 @@ class CallHandler:
 
         except Exception as e:
             log.warning("[CALL] Failed to accept call_id=%s: %s", call_req.id, e)
-            self._sessions.pop(call_req.id, None)
+            peer_id = self._call_id_to_peer.pop(call_req.id, None)
+            if peer_id is not None:
+                self._sessions.pop(peer_id, None)
 
     async def _connect_p2p(self, call: PhoneCall):
         """
         Called when PhoneCall arrives (caller confirmed).
         Finalise DH, hand off to ntgcalls, start audio.
         """
-        session = self._sessions.get(call.id)
+        peer_id = self._call_id_to_peer.get(call.id)
+        if peer_id is None:
+            log.warning("[CALL] No peer mapping for call_id=%s", call.id)
+            return
+        session = self._sessions.get(peer_id)
         if session is None:
-            log.warning("[CALL] No session for call_id=%s", call.id)
+            log.warning("[CALL] No session for peer_id=%s", peer_id)
             return
 
         try:
@@ -727,7 +758,6 @@ class CallHandler:
             key_bytes = compute_shared_key(call.g_a_or_b, b, dh_config)
 
             # Step 5: ntgcalls create_p2p_call for this peer
-            peer_id = session.peer_id
             self._ntg.create_p2p_call(peer_id)
 
             # Step 6: ntgcalls init_exchange + exchange_keys (DH finalisation)
@@ -741,19 +771,34 @@ class CallHandler:
             # Step 7: Build RTCServer list from PhoneCall connection endpoints
             rtc_servers = _build_rtc_servers(call)
 
-            # Step 8: configure raw PCM mode
-            audio_desc = ntgcalls.AudioDescription(
+            # Step 8: configure raw PCM mode — TWO calls required, one per direction.
+            ext_audio = ntgcalls.AudioDescription(
                 media_source=ntgcalls.MediaSource.EXTERNAL,
-                input="",
                 sample_rate=CALL_SAMPLE_RATE,
                 channel_count=CALL_CHANNELS,
+                input="",
+                keep_open=False,
             )
+
+            # CAPTURE: outbound — frames we push via send_external_frame()
             self._ntg.set_stream_sources(
                 peer_id,
                 ntgcalls.StreamMode.CAPTURE,
                 ntgcalls.MediaDescription(
-                    microphone=audio_desc,
-                    speaker=audio_desc,
+                    microphone=ext_audio,
+                    speaker=None, camera=None, screen=None,
+                ),
+            )
+
+            # PLAYBACK: inbound — frames ntgcalls delivers via on_frames()
+            # AudioReceiver resamples to CALL_SAMPLE_RATE for us.
+            self._ntg.set_stream_sources(
+                peer_id,
+                ntgcalls.StreamMode.PLAYBACK,
+                ntgcalls.MediaDescription(
+                    microphone=None,
+                    speaker=ext_audio,
+                    camera=None, screen=None,
                 ),
             )
 
@@ -773,9 +818,11 @@ class CallHandler:
 
         except Exception as e:
             log.warning("[CALL] P2P connect failed for call_id=%s: %s", call.id, e)
-            session = self._sessions.pop(call.id, None)
-            if session:
-                session.stop()
+            peer_id = self._call_id_to_peer.pop(call.id, None)
+            if peer_id is not None:
+                session = self._sessions.pop(peer_id, None)
+                if session:
+                    session.stop()
             # Discard the call cleanly
             try:
                 await self.client(DiscardCallRequest(

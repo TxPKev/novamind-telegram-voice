@@ -31,12 +31,12 @@ flowchart LR
     STT[Whisper Large-v3<br/>16 kHz]
     PIPE[Pipeline stub<br/>or your code]
     TTS[XTTS-v2<br/>24 kHz stream]
-    OUT[Outbound loop<br/>20 ms frames]
+    OUT[Outbound loop<br/>10 ms frames]
 
     Caller -.->|DH handshake| Tele
     Tele -->|AcceptCallRequest| NTG
     Caller ==>|inbound PCM| NTG
-    NTG ==>|on_frame| VAD
+    NTG ==>|on_frames| VAD
     VAD ==>|utterance| STT
     STT ==>|text| PIPE
     PIPE ==>|response| TTS
@@ -142,13 +142,16 @@ Once running, any incoming voice call to the configured account is auto-accepted
 |---|---|
 | Call sample rate | 48 000 Hz |
 | Channels | mono |
-| Frame size | 960 samples (20 ms) |
+| Frame size | 480 samples (10 ms) |
+| Frame bytes | 960 bytes (int16 LE) |
 | Sample format | PCM int16 little-endian |
 | Whisper sample rate | 16 000 Hz (resampled internally) |
 | XTTS sample rate | 24 000 Hz (resampled to 48 kHz before send) |
 | VAD silence threshold | -40 dB |
 | VAD silence duration | 0.8 s |
 | Min utterance length | 0.3 s |
+
+> **Note on frame size:** ntgcalls 2.1.0 `AudioSink.frameTime()` is **10 ms**, not 20 ms (a common misconception). Sending 20 ms frames causes jitter buffer underruns and audio artifacts. Verified against `ntgcalls/src/media/audio_sink.cpp`.
 
 ---
 
@@ -172,7 +175,7 @@ The pipeline runs in a thread pool — non-blocking with respect to the audio I/
 
 - Energy-based VAD is a placeholder. For robust use replace with silero-vad or webrtcvad.
 - ntgcalls 2.1.0 native bindings are stable for 1-on-1 calls but the API is not formally documented — names follow the C++ source.
-- CPU-only inference is theoretically possible but will not meet the 20 ms outbound pacing requirement.
+- CPU-only inference is theoretically possible but will not meet the 10 ms outbound pacing requirement.
 
 ---
 

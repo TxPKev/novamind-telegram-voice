@@ -1,6 +1,6 @@
 """
-ari_voice_call.py — AriNet Telegram Voice Call Handler
-=======================================================
+nova_voice_call.py — Telegram P2P Voice Call Handler
+=====================================================
 XTTS-v2 + Whisper Large-v3 + ntgcalls native P2P API
 Live bidirectional Telegram private call, 100% offline, no cloud, no API keys.
 
@@ -11,29 +11,29 @@ py-tgcalls (the high-level wrapper) does NOT expose private calls or raw PCM
 callbacks for 1-on-1 calls in its stable release. We bypass it entirely.
 
 Audio path:
-  Inbound:  ntgcalls on_frame() callback → 48kHz int16 PCM bytes
-            → float32 → VAD → Whisper (16kHz) → pipeline → response text
-  Outbound: XTTS inference_stream() → 24kHz float32
-            → resample 48kHz → int16 PCM bytes
-            → ntgcalls send_external_frame() every 20ms
+  Inbound:  ntgcalls on_frames() callback -> 48kHz int16 PCM bytes
+            -> float32 -> VAD -> Whisper (16kHz) -> pipeline -> response text
+  Outbound: XTTS inference_stream() -> 24kHz float32
+            -> resample 48kHz -> int16 PCM bytes
+            -> ntgcalls send_external_frame() every 10ms
 
 Signaling path (MTProto, via Telethon):
   UpdatePhoneCall / PhoneCallRequested
-  → GetDhConfig → compute g_b → AcceptCallRequest
-  → PhoneCall (full call object with connection endpoints)
-  → ntgcalls create_p2p_call() → init_exchange() → exchange_keys()
-  → connect_p2p() with RTCServer list from PhoneCall
+  -> GetDhConfig -> compute g_b -> AcceptCallRequest
+  -> PhoneCall (full call object with connection endpoints)
+  -> ntgcalls create_p2p_call() -> init_exchange() -> exchange_keys()
+  -> connect_p2p() with RTCServer list from PhoneCall
 
 Architecture:
-  Kevin calls Ari's Telegram number
-  → Telethon (UpdatePhoneCall) handles MTProto signaling
-  → ntgcalls handles WebRTC/SRTP transport (native C++)
-  → VAD + Whisper transcribes inbound audio
-  → AriNet pipeline (or stub) generates response
-  → XTTS streams response audio back into call
+  Caller dials the configured Telegram number
+  -> Telethon (UpdatePhoneCall) handles MTProto signaling
+  -> ntgcalls handles WebRTC/SRTP transport (native C++)
+  -> VAD + Whisper transcribes inbound audio
+  -> Pipeline (or stub) generates response
+  -> XTTS streams response audio back into call
 
 Why ntgcalls and not Telethon alone:
-  Telegram voice call audio is WebRTC/SRTP — it is peer-to-peer between clients.
+  Telegram voice call audio is WebRTC/SRTP - it is peer-to-peer between clients.
   Telethon only handles the MTProto signaling (accept, DH key exchange, endpoints).
   To actually send and receive audio you need a WebRTC stack.
   ntgcalls IS that WebRTC stack, implemented in C++ with Python pybind11 bindings.
@@ -41,23 +41,25 @@ Why ntgcalls and not Telethon alone:
 Python API note:
   ntgcalls ships pybind11 bindings. Method names follow snake_case convention
   matching the C++ / Go API:
-    create_p2p_call()     — initialise P2P session for this peer
-    init_exchange()       — start DH handshake with Telegram's dhConfig
-    exchange_keys()       — finalise key exchange, get fingerprint
-    connect_p2p()         — connect to TURN/STUN servers from PhoneCall object
-    set_stream_sources()  — configure raw PCM mode (MediaSource.EXTERNAL)
-    send_external_frame() — push outbound PCM frame (20ms / 960 samples @ 48kHz)
-    on_frame()            — register callback for inbound PCM frames
-    send_signaling_data() — relay WebRTC signaling data to remote peer
-    on_signal()           — register callback for inbound signaling data
+    create_p2p_call()     - initialise P2P session for this peer
+    init_exchange()       - start DH handshake with Telegram's dhConfig
+    exchange_keys()       - finalise key exchange, get fingerprint
+    connect_p2p()         - connect to TURN/STUN servers from PhoneCall object
+    set_stream_sources()  - configure raw PCM mode (MediaSource.EXTERNAL)
+                            CAPTURE  = outbound (microphone)
+                            PLAYBACK = inbound  (speaker = caller's voice)
+                            TWO separate calls required, one per direction.
+    send_external_frame() - push outbound PCM frame (10ms / 480 samples @ 48kHz)
+    on_frames             - register callback for inbound PCM frames
+                            Signature: (uid, mode, device, frames: list)
+    send_signaling_data() - relay WebRTC signaling data to remote peer
+    on_signal             - register callback for inbound signaling data
 
 Frame format (matches Telegram/WebRTC standard):
   PCM 16-bit signed little-endian, 48000 Hz, mono
-  Frame size: 960 samples = 20ms
+  Frame size: 480 samples = 10ms (NOT 20ms — verified in ntgcalls C++ source)
 
-Author: Kevin Kachramanow / NovaMind Studios
-GitHub: https://github.com/TxPKev/ari-telegram-voice
-License: MIT
+License: AGPL-3.0
 """
 
 import asyncio
@@ -74,7 +76,7 @@ from pathlib import Path
 import numpy as np
 from scipy.signal import resample_poly
 
-# ── Telethon ──────────────────────────────────────────────────────────────────
+# Telethon
 from telethon import TelegramClient, events
 from telethon.tl.types import (
     UpdatePhoneCall,
@@ -92,19 +94,19 @@ from telethon.tl.functions.phone import (
 )
 from telethon.tl.functions.messages import GetDhConfigRequest
 
-# ── ntgcalls (native P2P API) ─────────────────────────────────────────────────
+# ntgcalls (native P2P API)
 # Install: pip install ntgcalls==2.1.0 --no-deps
-# WARNING: NEVER run pip install without --no-deps in the AriNet environment.
+# WARNING: NEVER run pip install without --no-deps in this environment.
 # Any package that depends on torch will silently downgrade it to CPU.
 try:
     import ntgcalls
 except ImportError:
     print("[FATAL] ntgcalls not installed.")
     print("  Run: pip install ntgcalls==2.1.0 --no-deps")
-    print("  Do NOT omit --no-deps — it protects your torch/CUDA installation.")
+    print("  Do NOT omit --no-deps - it protects your torch/CUDA installation.")
     sys.exit(1)
 
-# ── Whisper ───────────────────────────────────────────────────────────────────
+# Whisper
 try:
     from faster_whisper import WhisperModel as FasterWhisperModel
     _FASTER_WHISPER = True
@@ -116,7 +118,7 @@ except ImportError:
         print("[FATAL] Neither faster-whisper nor openai-whisper is installed.")
         sys.exit(1)
 
-# ── XTTS-v2 ──────────────────────────────────────────────────────────────────
+# XTTS-v2
 try:
     from TTS.api import TTS
 except ImportError:
@@ -125,30 +127,32 @@ except ImportError:
 
 import torch
 
-# ── Logging ──────────────────────────────────────────────────────────────────
+# Logging
 logging.basicConfig(
     level=logging.INFO,
-    format="[%(asctime)s] [%(levelname)s] %(name)s — %(message)s",
+    format="[%(asctime)s] [%(levelname)s] %(name)s - %(message)s",
     datefmt="%H:%M:%S",
 )
-log = logging.getLogger("AriVoiceCall")
+log = logging.getLogger("VoiceCall")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # CONSTANTS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
-# ntgcalls / Telegram WebRTC standard
+# ntgcalls 2.1.0 / Telegram WebRTC standard
+# AudioSink.frameTime() = 10ms — verified in ntgcalls C++ source.
+# 20ms is a common misconception that breaks send_external_frame().
 CALL_SAMPLE_RATE   = 48_000    # Hz
 CALL_CHANNELS      = 1         # mono
-CALL_FRAME_SAMPLES = 960       # 20ms @ 48kHz
-CALL_FRAME_BYTES   = CALL_FRAME_SAMPLES * 2  # int16 = 2 bytes/sample
+CALL_FRAME_SAMPLES = 480       # 10ms @ 48kHz
+CALL_FRAME_BYTES   = CALL_FRAME_SAMPLES * 2  # int16 LE = 960 bytes
 
 WHISPER_SAMPLE_RATE = 16_000   # Whisper expects 16kHz
 XTTS_SAMPLE_RATE    = 24_000   # XTTS-v2 native output
 
 # Voice activity detection
-VAD_SILENCE_DB      = -40.0    # dB — below this level = silence
+VAD_SILENCE_DB      = -40.0    # dB - below this level = silence
 VAD_SILENCE_SECONDS = 0.8      # pause duration that triggers transcription
 VAD_MIN_SPEECH_SEC  = 0.3      # ignore utterances shorter than this
 
@@ -158,9 +162,9 @@ CALL_MAX_LAYER = 92
 CALL_LIBRARY_VERSIONS = ["7.0.0"]   # must be supported by ntgcalls
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # CONFIG
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def load_config() -> dict:
     """Load config from config.json. Copy config.example.json to get started."""
@@ -168,18 +172,18 @@ def load_config() -> dict:
     path = Path(__file__).parent / "config.json"
     if not path.exists():
         log.error("[CONFIG] config.json not found.")
-        log.error("  Copy config.example.json → config.json and fill in your values.")
+        log.error("  Copy config.example.json -> config.json and fill in your values.")
         sys.exit(1)
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # DH KEY EXCHANGE HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _int_to_bytes_big(n: int, length: int) -> bytes:
-    """Big-endian integer → bytes, zero-padded to length."""
+    """Big-endian integer -> bytes, zero-padded to length."""
     return n.to_bytes(length, byteorder="big")
 
 
@@ -216,17 +220,17 @@ def compute_shared_key(g_a_or_b: bytes, b: int, dh_config) -> bytes:
     return _int_to_bytes_big(key_int, 256)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # AUDIO UTILITIES
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def pcm_bytes_to_float32(raw: bytes) -> np.ndarray:
-    """int16 PCM bytes → float32 numpy [-1, 1]."""
+    """int16 PCM bytes -> float32 numpy [-1, 1]."""
     return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
 
 def float32_to_pcm_bytes(audio: np.ndarray) -> bytes:
-    """float32 numpy [-1, 1] → int16 PCM bytes."""
+    """float32 numpy [-1, 1] -> int16 PCM bytes."""
     return (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
 
 
@@ -249,9 +253,9 @@ def pad_or_trim_to(audio: np.ndarray, n: int) -> np.ndarray:
     return np.pad(audio, (0, n - len(audio)))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# VAD — energy-based Voice Activity Detection
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# VAD - energy-based Voice Activity Detection
+# -----------------------------------------------------------------------------
 
 class SimpleVAD:
     """
@@ -296,9 +300,9 @@ class SimpleVAD:
         self._speaking  = False
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STT — Whisper
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# STT - Whisper
+# -----------------------------------------------------------------------------
 
 class WhisperSTT:
     """
@@ -310,19 +314,19 @@ class WhisperSTT:
                  device: str = "cuda", language: str = "de"):
         self._lang = language
         if _FASTER_WHISPER:
-            log.info("[STT] Loading faster-whisper %s (int8_float16) …", model_size)
+            log.info("[STT] Loading faster-whisper %s (int8_float16) ...", model_size)
             self._model = FasterWhisperModel(
                 model_size, device=device, compute_type="int8_float16"
             )
             self._mode = "faster"
         else:
-            log.info("[STT] Loading openai-whisper %s …", model_size)
+            log.info("[STT] Loading openai-whisper %s ...", model_size)
             self._model = openai_whisper.load_model(model_size, device=device)
             self._mode = "openai"
         log.info("[STT] Ready (%s)", self._mode)
 
     def transcribe(self, audio_48k: np.ndarray) -> str:
-        """48kHz float32 → transcribed text."""
+        """48kHz float32 -> transcribed text."""
         audio_16k = _resample(audio_48k, CALL_SAMPLE_RATE, WHISPER_SAMPLE_RATE)
         if self._mode == "faster":
             segs, _ = self._model.transcribe(
@@ -338,9 +342,9 @@ class WhisperSTT:
             return result["text"].strip()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TTS — XTTS-v2
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# TTS - XTTS-v2
+# -----------------------------------------------------------------------------
 
 class XTTSStreamer:
     """
@@ -352,7 +356,7 @@ class XTTSStreamer:
     MODEL_NAME = "tts_models/multilingual/multi-dataset/xtts_v2"
 
     def __init__(self, speaker_wav: str | None = None, language: str = "de"):
-        log.info("[TTS] Loading XTTS-v2 …")
+        log.info("[TTS] Loading XTTS-v2 ...")
         self._tts   = TTS(model_name=self.MODEL_NAME).to("cuda")
         self._lang  = language
         if speaker_wav:
@@ -385,35 +389,36 @@ class XTTSStreamer:
             yield chunk.squeeze().cpu().numpy().astype(np.float32)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # PIPELINE STUB
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
-class AriPipeline:
+class EchoPipeline:
     """
-    Stub — replace process() with your AriNet pipeline call.
-    Example: from core.pipeline import run_pipeline; return run_pipeline(text)
+    Stub pipeline - replace process() with your own logic.
+    Default behaviour: echo the transcribed text back to the caller.
     """
 
     def process(self, text: str) -> str:
         log.info("[PIPELINE] Input: %r", text)
-        response = f"Ich habe verstanden: {text}"
+        response = f"You said: {text}"
         log.info("[PIPELINE] Response: %r", response)
         return response
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # OUTBOUND AUDIO LOOP
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 class OutboundAudioLoop:
     """
     Runs in a background thread.
-    Pulls 20ms frames from the queue and pushes them via
-    ntgcalls send_external_frame() at the correct 20ms pacing.
+    Pulls 10ms frames from the queue and pushes them via
+    ntgcalls send_external_frame() at the correct 10ms pacing.
+    Drift-corrected via busy-wait on the last 1ms (Windows time.sleep resolution).
     """
 
-    FRAME_INTERVAL = CALL_FRAME_SAMPLES / CALL_SAMPLE_RATE  # 0.020s
+    FRAME_INTERVAL = CALL_FRAME_SAMPLES / CALL_SAMPLE_RATE  # 0.010s
 
     def __init__(self, ntg: "ntgcalls.NTgCalls", chat_id: int):
         self._ntg     = ntg
@@ -429,7 +434,7 @@ class OutboundAudioLoop:
         self._stop.set()
 
     def push_audio(self, audio_48k: np.ndarray):
-        """Enqueue float32 audio (48kHz) as 20ms PCM frames."""
+        """Enqueue float32 audio (48kHz) as 10ms PCM frames."""
         total  = len(audio_48k)
         offset = 0
         while offset < total:
@@ -440,7 +445,7 @@ class OutboundAudioLoop:
             try:
                 self._queue.put_nowait(float32_to_pcm_bytes(chunk))
             except queue.Full:
-                log.warning("[OUT] Output queue full — dropping frame")
+                log.warning("[OUT] Output queue full - dropping frame")
             offset = end
 
     def _silence_frame(self) -> bytes:
@@ -452,7 +457,12 @@ class OutboundAudioLoop:
         while not self._stop.is_set():
             now = time.perf_counter()
             if now < next_tick:
-                time.sleep(next_tick - now)
+                slack = next_tick - now
+                if slack > 0.001:
+                    time.sleep(slack - 0.001)
+                # busy-wait the last 1ms — Windows time.sleep() resolution
+                while time.perf_counter() < next_tick:
+                    pass
             next_tick += self.FRAME_INTERVAL
 
             try:
@@ -477,9 +487,9 @@ class OutboundAudioLoop:
         log.info("[OUT] Audio loop stopped")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CALL SESSION — one per active call
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# CALL SESSION - one per active call
+# -----------------------------------------------------------------------------
 
 class CallSession:
     """
@@ -494,7 +504,7 @@ class CallSession:
                  ntg: "ntgcalls.NTgCalls",
                  stt: WhisperSTT,
                  tts: XTTSStreamer,
-                 pipeline: AriPipeline,
+                 pipeline: EchoPipeline,
                  executor):
         self.call_id    = call_obj.id
         self.access_hash = call_obj.access_hash
@@ -530,22 +540,22 @@ class CallSession:
             log.warning("[SESSION] stop error: %s", e)
 
     def on_inbound_frame(self, frame):
-        """Called by ntgcalls on_frame() callback — runs in ntgcalls audio thread."""
+        """Called per frame from the global on_frames callback (PLAYBACK only)."""
         raw_bytes = bytes(frame.data)
         chunk     = pcm_bytes_to_float32(raw_bytes)
         utterance = self._vad.feed(chunk)
         if utterance is not None:
             dur = len(utterance) / CALL_SAMPLE_RATE
             log.info("[VAD] Utterance detected (%.2fs)", dur)
-            # Dispatch to thread pool — do not block audio callback
+            # Dispatch to thread pool - do not block audio callback
             self._executor.submit(self._respond, utterance)
 
     def _respond(self, utterance_48k: np.ndarray):
-        """STT → Pipeline → TTS → push to outbound queue (runs in thread pool)."""
+        """STT -> Pipeline -> TTS -> push to outbound queue (runs in thread pool)."""
         try:
             t0   = time.perf_counter()
             text = self._stt.transcribe(utterance_48k)
-            log.info("[STT] %.2fs → %r", time.perf_counter() - t0, text)
+            log.info("[STT] %.2fs -> %r", time.perf_counter() - t0, text)
             if not text.strip():
                 return
 
@@ -564,11 +574,11 @@ class CallSession:
             log.warning("[SESSION] _respond error: %s", e)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CALL HANDLER — top-level orchestrator
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# CALL HANDLER - top-level orchestrator
+# -----------------------------------------------------------------------------
 
-class AriCallHandler:
+class CallHandler:
     """
     Orchestrates everything:
     - Telethon for MTProto signaling
@@ -583,23 +593,25 @@ class AriCallHandler:
             config["api_id"],
             config["api_hash"],
         )
-        # ntgcalls native instance — one per process
+        # ntgcalls native instance - one per process
         self._ntg = ntgcalls.NTgCalls()
 
         self._stt      = None
         self._tts      = None
-        self._pipeline = AriPipeline()
+        self._pipeline = EchoPipeline()
 
-        # Active sessions keyed by call_id
+        # Active sessions keyed by peer_id (= chat_id in ntgcalls P2P)
         self._sessions: dict[int, CallSession] = {}
+        # Reverse lookup: call_id -> peer_id (for PhoneCallDiscarded routing)
+        self._call_id_to_peer: dict[int, int] = {}
 
         import concurrent.futures
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
-    # ── Startup ───────────────────────────────────────────────────────────────
+    # Startup
 
     async def start(self):
-        log.info("[HANDLER] Connecting to Telegram …")
+        log.info("[HANDLER] Connecting to Telegram ...")
         await self.client.start(phone=self.cfg["phone"])
         me = await self.client.get_me()
         log.info("[HANDLER] Logged in as %s (%s)", me.first_name, me.phone)
@@ -608,11 +620,11 @@ class AriCallHandler:
         self._register_ntgcalls_callbacks()
 
         self.client.add_event_handler(self._on_update, events.Raw(UpdatePhoneCall))
-        log.info("[HANDLER] Ari is online — waiting for calls …")
+        log.info("[HANDLER] Voice handler online - waiting for calls ...")
         await self.client.run_until_disconnected()
 
     def _load_models(self):
-        log.info("[HANDLER] Loading STT + TTS models …")
+        log.info("[HANDLER] Loading STT + TTS models ...")
         self._stt = WhisperSTT(
             model_size=self.cfg.get("whisper_model", "large-v3"),
             device=self.cfg.get("device", "cuda"),
@@ -627,13 +639,21 @@ class AriCallHandler:
     def _register_ntgcalls_callbacks(self):
         """Register ntgcalls-level callbacks that apply to all calls."""
 
-        @self._ntg.on_frame()
-        def _on_frame(chat_id: int, frame):
-            session = self._sessions.get(chat_id)
-            if session:
+        @self._ntg.on_frames
+        def _on_frames(uid: int,
+                       mode: ntgcalls.StreamMode,
+                       device: ntgcalls.StreamDevice,
+                       frames: list):
+            # PLAYBACK = inbound (caller's voice). CAPTURE never fires here.
+            if mode != ntgcalls.StreamMode.PLAYBACK:
+                return
+            session = self._sessions.get(uid)
+            if session is None:
+                return
+            for frame in frames:
                 session.on_inbound_frame(frame)
 
-        @self._ntg.on_signal()
+        @self._ntg.on_signal
         def _on_signal(chat_id: int, data: bytes):
             # Relay signaling data back to remote peer via Telethon
             session = self._sessions.get(chat_id)
@@ -654,7 +674,7 @@ class AriCallHandler:
         except Exception as e:
             log.warning("[SIGNAL] relay error: %s", e)
 
-    # ── Incoming call ─────────────────────────────────────────────────────────
+    # Incoming call
 
     async def _on_update(self, update: UpdatePhoneCall):
         call = getattr(update, "phone_call", None)
@@ -667,15 +687,17 @@ class AriCallHandler:
             await self._accept(call)
 
         elif isinstance(call, PhoneCall):
-            # Full PhoneCall object arrives after remote confirms → connect ntgcalls
+            # Full PhoneCall object arrives after remote confirms -> connect ntgcalls
             log.info("[CALL] PhoneCall confirmed: id=%s", call.id)
             await self._connect_p2p(call)
 
         elif isinstance(call, PhoneCallDiscarded):
             log.info("[CALL] Discarded: id=%s reason=%s", call.id, call.reason)
-            session = self._sessions.pop(call.id, None)
-            if session:
-                session.stop()
+            peer_id = self._call_id_to_peer.pop(call.id, None)
+            if peer_id is not None:
+                session = self._sessions.pop(peer_id, None)
+                if session:
+                    session.stop()
 
     async def _accept(self, call_req: PhoneCallRequested):
         """DH exchange + AcceptCallRequest."""
@@ -690,7 +712,9 @@ class AriCallHandler:
                 self._stt, self._tts, self._pipeline, self._executor,
             )
             session.store_dh(b, dh_config)
-            self._sessions[call_req.id] = session
+            # Index by peer_id (= chat_id in ntgcalls)
+            self._sessions[session.peer_id] = session
+            self._call_id_to_peer[call_req.id] = session.peer_id
 
             # Step 3: AcceptCallRequest
             result = await self.client(AcceptCallRequest(
@@ -704,20 +728,26 @@ class AriCallHandler:
                     library_versions=CALL_LIBRARY_VERSIONS,
                 ),
             ))
-            log.info("[CALL] AcceptCallRequest sent — waiting for PhoneCall confirmation …")
+            log.info("[CALL] AcceptCallRequest sent - waiting for PhoneCall confirmation ...")
 
         except Exception as e:
             log.warning("[CALL] Failed to accept call_id=%s: %s", call_req.id, e)
-            self._sessions.pop(call_req.id, None)
+            peer_id = self._call_id_to_peer.pop(call_req.id, None)
+            if peer_id is not None:
+                self._sessions.pop(peer_id, None)
 
     async def _connect_p2p(self, call: PhoneCall):
         """
         Called when PhoneCall arrives (caller confirmed).
         Finalise DH, hand off to ntgcalls, start audio.
         """
-        session = self._sessions.get(call.id)
+        peer_id = self._call_id_to_peer.get(call.id)
+        if peer_id is None:
+            log.warning("[CALL] No peer mapping for call_id=%s", call.id)
+            return
+        session = self._sessions.get(peer_id)
         if session is None:
-            log.warning("[CALL] No session for call_id=%s", call.id)
+            log.warning("[CALL] No session for peer_id=%s", peer_id)
             return
 
         try:
@@ -728,7 +758,6 @@ class AriCallHandler:
             key_bytes = compute_shared_key(call.g_a_or_b, b, dh_config)
 
             # Step 5: ntgcalls create_p2p_call for this peer
-            peer_id = session.peer_id
             self._ntg.create_p2p_call(peer_id)
 
             # Step 6: ntgcalls init_exchange + exchange_keys (DH finalisation)
@@ -742,23 +771,38 @@ class AriCallHandler:
             # Step 7: Build RTCServer list from PhoneCall connection endpoints
             rtc_servers = _build_rtc_servers(call)
 
-            # Step 8: configure raw PCM mode
-            audio_desc = ntgcalls.AudioDescription(
+            # Step 8: configure raw PCM mode — TWO calls required, one per direction.
+            ext_audio = ntgcalls.AudioDescription(
                 media_source=ntgcalls.MediaSource.EXTERNAL,
-                input="",
                 sample_rate=CALL_SAMPLE_RATE,
                 channel_count=CALL_CHANNELS,
+                input="",
+                keep_open=False,
             )
+
+            # CAPTURE: outbound — frames we push via send_external_frame()
             self._ntg.set_stream_sources(
                 peer_id,
                 ntgcalls.StreamMode.CAPTURE,
                 ntgcalls.MediaDescription(
-                    microphone=audio_desc,
-                    speaker=audio_desc,
+                    microphone=ext_audio,
+                    speaker=None, camera=None, screen=None,
                 ),
             )
 
-            # Step 9: connect_p2p — hands control to ntgcalls WebRTC engine
+            # PLAYBACK: inbound — frames ntgcalls delivers via on_frames()
+            # AudioReceiver resamples to CALL_SAMPLE_RATE for us.
+            self._ntg.set_stream_sources(
+                peer_id,
+                ntgcalls.StreamMode.PLAYBACK,
+                ntgcalls.MediaDescription(
+                    microphone=None,
+                    speaker=ext_audio,
+                    camera=None, screen=None,
+                ),
+            )
+
+            # Step 9: connect_p2p - hands control to ntgcalls WebRTC engine
             self._ntg.connect_p2p(
                 peer_id,
                 rtc_servers,
@@ -770,13 +814,15 @@ class AriCallHandler:
             out_loop = OutboundAudioLoop(self._ntg, peer_id)
             session.start_audio(out_loop)
 
-            log.info("[CALL] P2P connected — bidirectional audio active for user_id=%s", peer_id)
+            log.info("[CALL] P2P connected - bidirectional audio active for user_id=%s", peer_id)
 
         except Exception as e:
             log.warning("[CALL] P2P connect failed for call_id=%s: %s", call.id, e)
-            session = self._sessions.pop(call.id, None)
-            if session:
-                session.stop()
+            peer_id = self._call_id_to_peer.pop(call.id, None)
+            if peer_id is not None:
+                session = self._sessions.pop(peer_id, None)
+                if session:
+                    session.stop()
             # Discard the call cleanly
             try:
                 await self.client(DiscardCallRequest(
@@ -792,8 +838,8 @@ class AriCallHandler:
 def _build_rtc_servers(call: PhoneCall) -> list:
     """
     Convert Telegram PhoneCall connection endpoints to ntgcalls RTCServer objects.
-    PhoneCall.connection  — primary PhoneConnection
-    PhoneCall.alternative_connections — list of PhoneConnection
+    PhoneCall.connection  - primary PhoneConnection
+    PhoneCall.alternative_connections - list of PhoneConnection
     """
     servers = []
     connections = [call.connection] + list(call.alternative_connections or [])
@@ -815,13 +861,13 @@ def _build_rtc_servers(call: PhoneCall) -> list:
     return servers
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # ENTRYPOINT
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 async def main():
     config  = load_config()
-    handler = AriCallHandler(config)
+    handler = CallHandler(config)
     await handler.start()
 
 

@@ -21,7 +21,7 @@ Default intended pipeline: inbound PCM is routed through VAD and Whisper, respon
 
 ---
 
-## Current status (May 2026)
+## Current status (July 2026)
 
 | Component | Status |
 |---|---|
@@ -31,9 +31,12 @@ Default intended pipeline: inbound PCM is routed through VAD and Whisper, respon
 | Bidirectional MTProto signaling relay | ✅ Working |
 | **Outbound audio** (`send_external_frame`, XTTS streaming) | ✅ Working |
 | **Inbound audio** (`on_frames` for P2P calls) |  [ntgcalls#44](https://github.com/pytgcalls/ntgcalls/issues/44) |
-| Clean call teardown | ✅ Working |
+| Clean call teardown (no lingering process, verified) | ✅ Working |
+| Out-of-process call worker (process isolation) | ✅ Working |
 
 **About the inbound audio limitation:** ntgcalls 2.1.0 does not deliver `on_frames` callbacks for private 1-on-1 P2P calls — the WebRTC `PacedSender` remains paused because `SignalNetworkState` is never set to `Up`. This is a confirmed upstream library issue, not a configuration error in this project. Group voice chats are not affected.
+
+**Fixed: lingering call process (July 2026).** Problem: after a call ended, the process hosting ntgcalls kept running with roughly 2 GB of memory still allocated. Cause: the native ntgcalls/WebRTC transport does not fully release its resources inside the host process after teardown. Fix: the call transport now runs in a dedicated out-of-process worker that is terminated when the call ends, which guarantees complete resource release — verified over repeated calls in both directions with zero leftover processes. The worker implementation lives in the integrating system, not in this proof-of-concept repository.
 
 ## Scope
 

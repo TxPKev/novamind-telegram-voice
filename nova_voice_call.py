@@ -390,7 +390,7 @@ class XTTSStreamer:
 
 
 # -----------------------------------------------------------------------------
-# PIPELINE STUB
+# PIPELINES - the "brain" is swappable, bring your own offline model
 # -----------------------------------------------------------------------------
 
 class EchoPipeline:
@@ -402,6 +402,62 @@ class EchoPipeline:
     def process(self, text: str) -> str:
         log.info("[PIPELINE] Input: %r", text)
         response = f"You said: {text}"
+        log.info("[PIPELINE] Response: %r", response)
+        return response
+
+
+class OllamaPipeline:
+    """
+    Optional pipeline: send the transcribed text to a local Ollama instance
+    (https://ollama.com) and speak the model's reply back to the caller.
+
+    Activate in config.json:
+        "pipeline":     "ollama",
+        "ollama_model": "llama3.2:3b"
+
+    Requires a running Ollama server (default http://localhost:11434).
+    Uses only the Python standard library - no extra dependencies.
+    """
+
+    DEFAULT_HOST = "http://localhost:11434"
+
+    def __init__(self, config: dict):
+        self._host  = config.get("ollama_host", self.DEFAULT_HOST).rstrip("/")
+        self._model = config.get("ollama_model", "llama3.2:3b")
+        # Keep replies short - they are spoken back over the call.
+        self._system = config.get(
+            "ollama_system",
+            "You are a voice assistant on a phone call. "
+            "Answer briefly, in one or two spoken sentences.",
+        )
+
+    def process(self, text: str) -> str:
+        import json as _json
+        import urllib.request
+        import urllib.error
+        log.info("[PIPELINE] Input: %r", text)
+        payload = _json.dumps({
+            "model":  self._model,
+            "prompt": text,
+            "system": self._system,
+            "stream": False,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self._host}/api/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            # Generous timeout: first request loads the model into memory.
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+            response = (data.get("response") or "").strip()
+            if not response:
+                log.error("[PIPELINE] Ollama returned an empty response")
+                response = "I did not get an answer from the model."
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            log.error("[PIPELINE] Ollama request failed: %s", e)
+            response = "Sorry, my language model is not reachable right now."
         log.info("[PIPELINE] Response: %r", response)
         return response
 
@@ -598,7 +654,11 @@ class CallHandler:
 
         self._stt      = None
         self._tts      = None
-        self._pipeline = EchoPipeline()
+        # Swappable brain: "echo" (default) or "ollama" - set "pipeline" in config.json
+        if config.get("pipeline", "echo") == "ollama":
+            self._pipeline = OllamaPipeline(config)
+        else:
+            self._pipeline = EchoPipeline()
 
         # Active sessions keyed by peer_id (= chat_id in ntgcalls P2P)
         self._sessions: dict[int, CallSession] = {}

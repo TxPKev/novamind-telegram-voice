@@ -11,6 +11,8 @@ A locally running, offline AI – reachable via Telegram voice call (pure voice 
 
 Low-level integration of Telegram P2P voice calls with external PCM audio sources. Built directly on Telethon (MTProto signaling) and ntgcalls (WebRTC transport) — no high-level wrappers.
 
+> **License: AGPL-3.0.** If you build this bridge into a network-accessible service, your service source must be published under the same license, with NovaMind Studios credited as the source. Details in the [License](#license) section.
+
 ---
 
 ## What this is
@@ -160,6 +162,8 @@ On first run, Telethon will prompt for the SMS code Telegram sends to your phone
 
 ## Custom pipeline
 
+**This bridge is the telephony layer — the "brain" is swappable.** Bring your own offline model: anything with a `process(text) -> text` interface plugs in. The default `EchoPipeline` just repeats what you said; `OllamaPipeline` (below) connects a real local LLM.
+
 Replace `EchoPipeline` in `nova_voice_call.py` with your own logic:
 
 ```python
@@ -172,11 +176,27 @@ The pipeline runs in a thread pool — non-blocking with respect to the audio I/
 
 ---
 
+## Test it with your own offline model (Ollama)
+
+Five steps from clone to a phone call with a local LLM — no cloud involved:
+
+1. Install [Ollama](https://ollama.com/download) and make sure it is running (`ollama serve`, default port 11434).
+2. Pull a small model, e.g. `ollama pull llama3.2:3b` (a 3B model answers fast enough for a call).
+3. In your `config.json`, set `"pipeline": "ollama"` and `"ollama_model": "llama3.2:3b"`.
+4. Start the bridge: `python nova_voice_call.py`.
+5. Call the configured Telegram account — the model answers with your cloned voice.
+
+The Ollama connection uses only the Python standard library; no extra packages needed. Host and system prompt are configurable via `ollama_host` and `ollama_system`.
+
+---
+
 ## License
 
-AGPL-3.0 — see [LICENSE](LICENSE).
+**AGPL-3.0** — see [LICENSE](LICENSE). This is a strong copyleft license, and it is the condition for using this code:
 
-If you integrate this into a network-accessible service, your service source must be made available under the same license.
+- If you integrate this bridge into any **network-accessible service** (a bot, a hosted assistant, a call gateway), you must make **your own service's source code** available under AGPL-3.0 as well.
+- You must retain the license and attribute **NovaMind Studios** as the source of the bridge.
+- There is no closed-source or proprietary use of this bridge in networked services — if you need different terms, contact the address below.
 
 ---
 

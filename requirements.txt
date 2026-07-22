@@ -1,34 +1,17 @@
-# ── Telegram ──────────────────────────────────────────────────────────────────
-# Telethon: Telegram client (user-account, not bot)
-Telethon>=1.36.0
+--extra-index-url https://download.pytorch.org/whl/cu121
 
-# pytgcalls v2+ wraps ntgcalls — prebuilt Windows x86_64 wheel included
-# Install: pip install "pytgcalls[telethon]"
-pytgcalls[telethon]>=2.0.0rc3
+Telethon>=1.36.0,<2.0.0
+cryptg>=0.4.0,<1.0.0
 
-# ntgcalls: Windows-native Telegram calls library (installs with pytgcalls)
-# Separate install only if pytgcalls doesn't bundle it:
-# ntgcalls>=2.0.0rc3
+ntgcalls==2.1.0
 
-# ── Speech-to-Text ────────────────────────────────────────────────────────────
-# Option A (recommended): faster-whisper — int8 quantised, 2-4x faster
-faster-whisper>=1.0.0
+torch==2.5.1+cu121
+torchaudio==2.5.1+cu121
 
-# Option B: openai-whisper (fallback if faster-whisper unavailable)
-# openai-whisper>=20231117
+faster-whisper>=1.0.0,<2.0.0
 
-# ── Text-to-Speech ────────────────────────────────────────────────────────────
-# Coqui TTS — XTTS-v2
-TTS>=0.22.0
+TTS==0.22.0
 
-# ── PyTorch (CUDA 12.1 — match your system) ───────────────────────────────────
-# Install separately to avoid pip overwriting your CUDA build:
-# pip install torch==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
-torch>=2.5.1
-
-# ── Audio / DSP ───────────────────────────────────────────────────────────────
-numpy>=1.26.0
-scipy>=1.13.0
-
-# ── Utilities ─────────────────────────────────────────────────────────────────
-cryptg       # Optional: faster Telegram crypto (C extension)
+numpy>=1.26.0,<2.0.0
+scipy>=1.13.0,<2.0.0
+soundfile>=0.12.1,<1.0.0

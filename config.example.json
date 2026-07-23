@@ -14,6 +14,6 @@
 
   "_comment_pipeline": "Brain selection: 'echo' repeats what you said, 'ollama' answers via a local Ollama model.",
   "pipeline":     "echo",
-  "ollama_model": "llama3.2:3b",
+  "ollama_model": "qwen2.5:3b",
   "ollama_host":  "http://localhost:11434"
 }

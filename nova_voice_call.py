@@ -52,8 +52,8 @@ Python API note:
     send_external_frame() - push outbound PCM frame (10ms / 480 samples @ 48kHz)
     on_frames             - register callback for inbound PCM frames
                             Signature: (uid, mode, device, frames: list)
-    send_signaling_data() - relay WebRTC signaling data to remote peer
-    on_signal             - register callback for inbound signaling data
+    send_signaling()      - feed inbound MTProto signaling data into ntgcalls
+    on_signaling          - register callback for outbound signaling data
 
 Frame format (matches Telegram/WebRTC standard):
   PCM 16-bit signed little-endian, 48000 Hz, mono
@@ -64,7 +64,6 @@ License: AGPL-3.0
 
 import asyncio
 import logging
-import os
 import struct
 import sys
 import time
@@ -80,6 +79,7 @@ from scipy.signal import resample_poly
 from telethon import TelegramClient, events
 from telethon.tl.types import (
     UpdatePhoneCall,
+    UpdatePhoneCallSignalingData,
     PhoneCallRequested,
     PhoneCallAccepted,
     PhoneCall,
@@ -156,10 +156,13 @@ VAD_SILENCE_DB      = -40.0    # dB - below this level = silence
 VAD_SILENCE_SECONDS = 0.8      # pause duration that triggers transcription
 VAD_MIN_SPEECH_SEC  = 0.3      # ignore utterances shorter than this
 
-# Telegram DH / call protocol
-CALL_MIN_LAYER = 65
-CALL_MAX_LAYER = 92
-CALL_LIBRARY_VERSIONS = ["7.0.0"]   # must be supported by ntgcalls
+# Echo protection: while we speak, our own voice comes back as PLAYBACK
+# frames (Telegram buffer reverb). Without this gate the bot transcribes
+# its own answer and replies to itself in an endless loop.
+ECHO_CARENCE_MS     = 800      # ignore inbound audio this long after speaking
+
+# Call protocol layers/versions come from ntgcalls.NTgCalls.get_protocol()
+# at runtime - do not hardcode them here, they go stale.
 
 
 # -----------------------------------------------------------------------------
@@ -179,48 +182,6 @@ def load_config() -> dict:
 
 
 # -----------------------------------------------------------------------------
-# DH KEY EXCHANGE HELPERS
-# -----------------------------------------------------------------------------
-
-def _int_to_bytes_big(n: int, length: int) -> bytes:
-    """Big-endian integer -> bytes, zero-padded to length."""
-    return n.to_bytes(length, byteorder="big")
-
-
-def _bytes_to_int(b: bytes) -> int:
-    return int.from_bytes(b, byteorder="big")
-
-
-def _mod_exp(base: int, exp: int, mod: int) -> int:
-    return pow(base, exp, mod)
-
-
-def compute_g_b(dh_config) -> tuple[int, int]:
-    """
-    Compute g_b = g^b mod p for Telegram DH handshake.
-    Returns (b, g_b) where b is our secret exponent.
-    dh_config: result of GetDhConfigRequest (has .g, .p, .random)
-    """
-    p = _bytes_to_int(dh_config.p)
-    g = dh_config.g
-    # Generate random 256-byte secret exponent
-    b = int.from_bytes(os.urandom(256), byteorder="big") % (p - 1)
-    g_b = _mod_exp(g, b, p)
-    return b, g_b
-
-
-def compute_shared_key(g_a_or_b: bytes, b: int, dh_config) -> bytes:
-    """
-    Compute shared key = g_a^b mod p.
-    Returns 256-byte key (big-endian, zero-padded).
-    """
-    p = _bytes_to_int(dh_config.p)
-    g_a = _bytes_to_int(g_a_or_b)
-    key_int = _mod_exp(g_a, b, p)
-    return _int_to_bytes_big(key_int, 256)
-
-
-# -----------------------------------------------------------------------------
 # AUDIO UTILITIES
 # -----------------------------------------------------------------------------
 
@@ -232,6 +193,24 @@ def pcm_bytes_to_float32(raw: bytes) -> np.ndarray:
 def float32_to_pcm_bytes(audio: np.ndarray) -> bytes:
     """float32 numpy [-1, 1] -> int16 PCM bytes."""
     return (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+
+
+def _resolve_ntg_future(future, deadline: float = 5.0):
+    """
+    ntgcalls methods may return a Future instead of a plain value.
+    Busy-wait it to completion (run this OFF the asyncio event loop -
+    ntgcalls futures need the loop running to make progress).
+    """
+    if future is None:
+        return None
+    if not hasattr(future, "done"):
+        return future
+    limit = time.monotonic() + deadline
+    while not future.done():
+        if time.monotonic() > limit:
+            raise TimeoutError(f"ntgcalls Future timeout ({deadline:.0f}s)")
+        time.sleep(0.001)
+    return future.result()
 
 
 def _resample(audio: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
@@ -373,20 +352,30 @@ class XTTSStreamer:
 
     def stream(self, text: str):
         """
-        Generator yielding float32 numpy chunks at 24kHz.
-        Uses XTTS inference_stream() for low-latency first chunk.
+        Generator yielding float32 numpy audio at 24kHz.
+
+        NOTE: XTTS `inference_stream()` is broken with transformers >= ~4.40
+        (its custom stream generator raises "'int' object has no attribute
+        'device'"). We use the non-streaming `inference()` instead - it works
+        with the pinned transformers 4.46.3 and returns the full utterance,
+        which the outbound loop then paces into 10 ms frames.
         """
         log.info("[TTS] Synthesising: %r", text[:80])
         syn = self._tts.synthesizer
-        for chunk in syn.tts_model.inference_stream(
+        out = syn.tts_model.inference(
             text,
             self._lang,
             syn.gpt_cond_latent,
             syn.speaker_embedding,
-            stream_chunk_size=20,
+            temperature=0.7,
             enable_text_splitting=True,
-        ):
-            yield chunk.squeeze().cpu().numpy().astype(np.float32)
+        )
+        wav = out["wav"] if isinstance(out, dict) else out
+        if hasattr(wav, "detach"):
+            wav = wav.detach().cpu().numpy()
+        wav = np.asarray(wav, dtype=np.float32).squeeze()
+        if wav.size:
+            yield wav
 
 
 # -----------------------------------------------------------------------------
@@ -413,7 +402,7 @@ class OllamaPipeline:
 
     Activate in config.json:
         "pipeline":     "ollama",
-        "ollama_model": "llama3.2:3b"
+        "ollama_model": "qwen2.5:3b"
 
     Requires a running Ollama server (default http://localhost:11434).
     Uses only the Python standard library - no extra dependencies.
@@ -423,7 +412,7 @@ class OllamaPipeline:
 
     def __init__(self, config: dict):
         self._host  = config.get("ollama_host", self.DEFAULT_HOST).rstrip("/")
-        self._model = config.get("ollama_model", "llama3.2:3b")
+        self._model = config.get("ollama_model", "qwen2.5:3b")
         # Keep replies short - they are spoken back over the call.
         self._system = config.get(
             "ollama_system",
@@ -489,6 +478,9 @@ class OutboundAudioLoop:
     def stop(self):
         self._stop.set()
 
+    def queue_empty(self) -> bool:
+        return self._queue.empty()
+
     def push_audio(self, audio_48k: np.ndarray):
         """Enqueue float32 audio (48kHz) as 10ms PCM frames."""
         total  = len(audio_48k)
@@ -529,13 +521,13 @@ class OutboundAudioLoop:
             try:
                 # ntgcalls native API: send_external_frame(chat_id, device, data, frame_info)
                 # device = StreamDevice.MICROPHONE (outbound = microphone stream)
+                # FrameData takes 4 positional args (ts, width, height, rotation) —
+                # width/height/rotation are 0 for audio. Same as audio_loop.py.
                 self._ntg.send_external_frame(
                     self._chat_id,
                     ntgcalls.StreamDevice.MICROPHONE,
                     frame_bytes,
-                    ntgcalls.FrameData(
-                        absolute_capture_timestamp_ms=int(time.monotonic() * 1000)
-                    ),
+                    ntgcalls.FrameData(int(time.monotonic() * 1000), 0, 0, 0),
                 )
             except Exception as e:
                 log.warning("[OUT] send_external_frame error: %s", e)
@@ -565,23 +557,29 @@ class CallSession:
         self.call_id    = call_obj.id
         self.access_hash = call_obj.access_hash
         self.peer_id    = call_obj.admin_id
+        # ntgcalls-internal call id - create_p2p_call's return value.
+        # NOT necessarily the user id; peer_id is only the fallback.
+        self.ntg_call_id = call_obj.admin_id
         self._ntg       = ntg
         self._stt       = stt
         self._tts       = tts
         self._pipeline  = pipeline
         self._executor  = executor
 
-        # DH state (set during accept)
-        self._b_secret: int | None = None
-        self._dh_config             = None
+        # Signaling state: data arriving before connect_p2p must be queued
+        # (same pattern as the proven implementation - sending it early is lost)
+        self.connection_initialized = False
+        self.signaling_queue: list[bytes] = []
+        # Guard: connect_p2p must run once even though Telegram re-sends PhoneCall
+        self.p2p_started = False
+
+        # Echo protection state (see ECHO_CARENCE_MS)
+        self._speaking             = False
+        self._speaking_released_at = 0.0
 
         # Audio
         self._vad     = SimpleVAD()
         self._out_loop: OutboundAudioLoop | None = None
-
-    def store_dh(self, b_secret: int, dh_config):
-        self._b_secret  = b_secret
-        self._dh_config = dh_config
 
     def start_audio(self, loop: OutboundAudioLoop):
         self._out_loop = loop
@@ -591,12 +589,19 @@ class CallSession:
         if self._out_loop:
             self._out_loop.stop()
         try:
-            self._ntg.stop(self.peer_id)
+            self._ntg.stop(self.ntg_call_id)
         except Exception as e:
             log.warning("[SESSION] stop error: %s", e)
 
     def on_inbound_frame(self, frame):
         """Called per frame from the global on_frames callback (PLAYBACK only)."""
+        # Echo gates: while we speak (and shortly after), inbound frames are
+        # our own voice reverberating back - discard, never transcribe.
+        if self._speaking:
+            self._vad.reset()
+            return
+        if (time.monotonic() - self._speaking_released_at) * 1000 < ECHO_CARENCE_MS:
+            return
         raw_bytes = bytes(frame.data)
         chunk     = pcm_bytes_to_float32(raw_bytes)
         utterance = self._vad.feed(chunk)
@@ -617,15 +622,28 @@ class CallSession:
 
             response = self._pipeline.process(text)
 
-            t1    = time.perf_counter()
-            first = True
-            for chunk_24k in self._tts.stream(response):
-                if first:
-                    log.info("[TTS] First chunk in %.2fs", time.perf_counter() - t1)
-                    first = False
-                chunk_48k = _resample(chunk_24k, XTTS_SAMPLE_RATE, CALL_SAMPLE_RATE)
-                if self._out_loop:
-                    self._out_loop.push_audio(chunk_48k)
+            self._speaking = True
+            try:
+                t1    = time.perf_counter()
+                first = True
+                for chunk_24k in self._tts.stream(response):
+                    if first:
+                        log.info("[TTS] First chunk in %.2fs", time.perf_counter() - t1)
+                        first = False
+                    chunk_48k = _resample(chunk_24k, XTTS_SAMPLE_RATE, CALL_SAMPLE_RATE)
+                    if self._out_loop:
+                        self._out_loop.push_audio(chunk_48k)
+                # Wait until the queued audio has actually been sent -
+                # only then does the echo carence window start.
+                deadline = time.monotonic() + 60.0
+                while (self._out_loop and not self._out_loop.queue_empty()
+                       and time.monotonic() < deadline):
+                    time.sleep(0.05)
+            finally:
+                # Everything that arrived while we spoke is echo - drop it.
+                self._vad.reset()
+                self._speaking             = False
+                self._speaking_released_at = time.monotonic()
         except Exception as e:
             log.warning("[SESSION] _respond error: %s", e)
 
@@ -664,13 +682,29 @@ class CallHandler:
         self._sessions: dict[int, CallSession] = {}
         # Reverse lookup: call_id -> peer_id (for PhoneCallDiscarded routing)
         self._call_id_to_peer: dict[int, int] = {}
+        # ntgcalls-internal call id -> peer_id (they are NOT guaranteed equal;
+        # ntgcalls callbacks report the internal id)
+        self._ntg_to_peer: dict[int, int] = {}
 
         import concurrent.futures
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
+        # The running asyncio loop, captured in start(). ntgcalls callbacks fire
+        # on a native thread and must hop back onto THIS loop to talk to Telethon.
+        self._loop = None
+
+    async def _ntg_call(self, method, *args, deadline: float = 5.0, **kwargs):
+        """Run an ntgcalls method off the event loop and resolve its Future."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, lambda: _resolve_ntg_future(method(*args, **kwargs), deadline))
+
     # Startup
 
     async def start(self):
+        # Capture the running loop so native ntgcalls callbacks can schedule
+        # coroutines back onto it (client.loop is unreliable across versions).
+        self._loop = asyncio.get_running_loop()
         log.info("[HANDLER] Connecting to Telegram ...")
         await self.client.start(phone=self.cfg["phone"])
         me = await self.client.get_me()
@@ -680,6 +714,8 @@ class CallHandler:
         self._register_ntgcalls_callbacks()
 
         self.client.add_event_handler(self._on_update, events.Raw(UpdatePhoneCall))
+        self.client.add_event_handler(
+            self._on_signaling_data, events.Raw(UpdatePhoneCallSignalingData))
         log.info("[HANDLER] Voice handler online - waiting for calls ...")
         await self.client.run_until_disconnected()
 
@@ -707,21 +743,30 @@ class CallHandler:
             # PLAYBACK = inbound (caller's voice). CAPTURE never fires here.
             if mode != ntgcalls.StreamMode.PLAYBACK:
                 return
-            session = self._sessions.get(uid)
+            # uid is the ntgcalls-internal call id - map to peer first
+            session = self._sessions.get(self._ntg_to_peer.get(uid, uid))
             if session is None:
                 return
             for frame in frames:
                 session.on_inbound_frame(frame)
 
-        @self._ntg.on_signal
-        def _on_signal(chat_id: int, data: bytes):
-            # Relay signaling data back to remote peer via Telethon
-            session = self._sessions.get(chat_id)
-            if session:
+        @self._ntg.on_signaling
+        def _on_signaling(chat_id: int, data: bytes):
+            # Relay signaling data back to Telegram via Telethon. This fires on a
+            # native ntgcalls thread - hop onto the captured asyncio loop.
+            session = self._sessions.get(self._ntg_to_peer.get(chat_id, chat_id))
+            if session and self._loop:
                 asyncio.run_coroutine_threadsafe(
                     self._relay_signal(session, data),
-                    self.client.loop,
+                    self._loop,
                 )
+
+        @self._ntg.on_connection_change
+        def _on_connection_change(chat_id: int, network_info):
+            # State arrives as enum in-process; normalise to the bare name.
+            state = getattr(network_info, "state", None)
+            state_name = str(state).rsplit(".", 1)[-1] if state is not None else "?"
+            log.info("[CALL] Connection state: %s (chat_id=%s)", state_name, chat_id)
 
     async def _relay_signal(self, session: CallSession, data: bytes):
         """Send WebRTC signaling data back through MTProto."""
@@ -733,6 +778,23 @@ class CallHandler:
             ))
         except Exception as e:
             log.warning("[SIGNAL] relay error: %s", e)
+
+    async def _on_signaling_data(self, update: UpdatePhoneCallSignalingData):
+        """Inbound signaling from Telegram -> ntgcalls. Queued until connect_p2p ran."""
+        peer_id = self._call_id_to_peer.get(update.phone_call_id)
+        session = self._sessions.get(peer_id) if peer_id is not None else None
+        if session is None:
+            log.warning("[SIGNAL] no session for call_id=%s", update.phone_call_id)
+            return
+        data = bytes(update.data)
+        if not session.connection_initialized:
+            session.signaling_queue.append(data)
+            log.info("[SIGNAL] queued before connect_p2p: %d bytes", len(data))
+            return
+        try:
+            await self._ntg_call(self._ntg.send_signaling, session.ntg_call_id, data)
+        except Exception as e:
+            log.warning("[SIGNAL] send_signaling error: %s", e)
 
     # Incoming call
 
@@ -757,35 +819,83 @@ class CallHandler:
             if peer_id is not None:
                 session = self._sessions.pop(peer_id, None)
                 if session:
+                    self._ntg_to_peer.pop(session.ntg_call_id, None)
                     session.stop()
 
     async def _accept(self, call_req: PhoneCallRequested):
-        """DH exchange + AcceptCallRequest."""
+        """
+        Accept an incoming call. The DH handshake is done entirely by ntgcalls
+        (init_exchange returns our g_b) - no Python-side DH math.
+        Order matters: create_p2p_call -> CAPTURE stream -> init_exchange -> accept.
+        """
         try:
-            # Step 1: Get DH config from Telegram
-            dh_config = await self.client(GetDhConfigRequest(0, 256))
-            b, g_b    = compute_g_b(dh_config)
-
-            # Step 2: Create session, store DH state
+            # Step 1: Create session
             session = CallSession(
                 call_req, self._ntg,
                 self._stt, self._tts, self._pipeline, self._executor,
             )
-            session.store_dh(b, dh_config)
-            # Index by peer_id (= chat_id in ntgcalls)
-            self._sessions[session.peer_id] = session
-            self._call_id_to_peer[call_req.id] = session.peer_id
+            peer_id = session.peer_id
+            self._sessions[peer_id] = session
+            self._call_id_to_peer[call_req.id] = peer_id
 
-            # Step 3: AcceptCallRequest
-            result = await self.client(AcceptCallRequest(
+            # Step 2: create_p2p_call MUST come before init_exchange.
+            # Return value = ntgcalls-internal call id (NOT the user id!);
+            # some versions return None - then the user id is the fallback.
+            ntg_id = await self._ntg_call(self._ntg.create_p2p_call, peer_id)
+            if not ntg_id:
+                ntg_id = peer_id
+            session.ntg_call_id = ntg_id
+            self._ntg_to_peer[ntg_id] = peer_id
+
+            # Step 3: CAPTURE (outbound) stream source right after create_p2p_call -
+            # BEFORE init_exchange and connect_p2p. PLAYBACK is set after connect_p2p.
+            await self._ntg_call(
+                self._ntg.set_stream_sources,
+                ntg_id,
+                ntgcalls.StreamMode.CAPTURE,
+                ntgcalls.MediaDescription(
+                    microphone=ntgcalls.AudioDescription(
+                        media_source=ntgcalls.MediaSource.EXTERNAL,
+                        sample_rate=CALL_SAMPLE_RATE,
+                        channel_count=CALL_CHANNELS,
+                        input="",
+                    ),
+                ),
+            )
+
+            # Step 4: DH config from Telegram, handed to ntgcalls
+            dh_config = await self.client(GetDhConfigRequest(
+                version=0, random_length=256))
+            exchange_result = await self._ntg_call(
+                self._ntg.init_exchange,
+                user_id=ntg_id,
+                dh_config=ntgcalls.DhConfig(
+                    g=dh_config.g,
+                    p=dh_config.p,
+                    random=dh_config.random,
+                ),
+                g_a_hash=call_req.g_a_hash,
+            )
+            # Result can be AuthParams (has .g_b) or raw bytes
+            if hasattr(exchange_result, "g_b"):
+                g_b = exchange_result.g_b
+            elif isinstance(exchange_result, bytes):
+                g_b = exchange_result
+            else:
+                g_b = bytes(exchange_result)
+            log.info("[CALL] init_exchange done, g_b length: %d", len(g_b))
+
+            # Step 5: AcceptCallRequest with protocol straight from ntgcalls
+            protocol = ntgcalls.NTgCalls.get_protocol()
+            await self.client(AcceptCallRequest(
                 peer=InputPhoneCall(call_req.id, call_req.access_hash),
-                g_b=_int_to_bytes_big(g_b, 256),
+                g_b=g_b,
                 protocol=PhoneCallProtocol(
-                    min_layer=CALL_MIN_LAYER,
-                    max_layer=CALL_MAX_LAYER,
-                    udp_p2p=True,
-                    udp_reflector=True,
-                    library_versions=CALL_LIBRARY_VERSIONS,
+                    min_layer=protocol.min_layer,
+                    max_layer=protocol.max_layer,
+                    udp_p2p=protocol.udp_p2p,
+                    udp_reflector=protocol.udp_reflector,
+                    library_versions=list(protocol.library_versions),
                 ),
             ))
             log.info("[CALL] AcceptCallRequest sent - waiting for PhoneCall confirmation ...")
@@ -810,68 +920,77 @@ class CallHandler:
             log.warning("[CALL] No session for peer_id=%s", peer_id)
             return
 
+        # Telegram re-sends the PhoneCall (confirmed) update several times.
+        # connect_p2p must run exactly once - a second run makes ntgcalls raise
+        # "Connection already made", and the error path would tear down the
+        # already-established call. Guard against re-entry.
+        if session.p2p_started:
+            log.info("[CALL] Duplicate PhoneCall update for call_id=%s - ignored", call.id)
+            return
+        session.p2p_started = True
+
         try:
-            b         = session._b_secret
-            dh_config = session._dh_config
+            ntg_id = session.ntg_call_id
 
-            # Step 4: Compute shared key from g_a sent by caller
-            key_bytes = compute_shared_key(call.g_a_or_b, b, dh_config)
-
-            # Step 5: ntgcalls create_p2p_call for this peer
-            self._ntg.create_p2p_call(peer_id)
-
-            # Step 6: ntgcalls init_exchange + exchange_keys (DH finalisation)
-            self._ntg.init_exchange(peer_id, dh_config, call.g_a_or_b)
-            auth_params = self._ntg.exchange_keys(
-                peer_id,
-                call.g_a_or_b,
-                call.key_fingerprint,
+            # Step 6: exchange_keys finalises the DH handshake inside ntgcalls
+            # (init_exchange already ran during _accept)
+            await self._ntg_call(
+                self._ntg.exchange_keys,
+                user_id=ntg_id,
+                g_a_or_b=call.g_a_or_b,
+                fingerprint=call.key_fingerprint,
             )
 
             # Step 7: Build RTCServer list from PhoneCall connection endpoints
             rtc_servers = _build_rtc_servers(call)
+            if not rtc_servers:
+                log.warning("[CALL] No RTC servers in PhoneCall object")
+                return
 
-            # Step 8: configure raw PCM mode — TWO calls required, one per direction.
-            ext_audio = ntgcalls.AudioDescription(
-                media_source=ntgcalls.MediaSource.EXTERNAL,
-                sample_rate=CALL_SAMPLE_RATE,
-                channel_count=CALL_CHANNELS,
-                input="",
-                keep_open=False,
+            # Step 8: connect_p2p - hands control to ntgcalls WebRTC engine
+            protocol = ntgcalls.NTgCalls.get_protocol()
+            await self._ntg_call(
+                self._ntg.connect_p2p,
+                user_id=ntg_id,
+                servers=rtc_servers,
+                versions=list(protocol.library_versions),
+                p2p_allowed=True,
+                deadline=12.0,
             )
 
-            # CAPTURE: outbound — frames we push via send_external_frame()
-            self._ntg.set_stream_sources(
-                peer_id,
-                ntgcalls.StreamMode.CAPTURE,
-                ntgcalls.MediaDescription(
-                    microphone=ext_audio,
-                    speaker=None, camera=None, screen=None,
-                ),
-            )
+            # Flush signaling data that arrived before connect_p2p was ready
+            session.connection_initialized = True
+            for queued in session.signaling_queue:
+                try:
+                    await self._ntg_call(self._ntg.send_signaling, ntg_id, queued)
+                except Exception as e:
+                    log.warning("[SIGNAL] queued relay error: %s", e)
+            session.signaling_queue.clear()
 
-            # PLAYBACK: inbound — frames ntgcalls delivers via on_frames()
-            # AudioReceiver resamples to CALL_SAMPLE_RATE for us.
-            self._ntg.set_stream_sources(
-                peer_id,
+            # Step 9: PLAYBACK (inbound) stream source AFTER connect_p2p -
+            # only then does on_frames deliver inbound frames.
+            await self._ntg_call(
+                self._ntg.set_stream_sources,
+                ntg_id,
                 ntgcalls.StreamMode.PLAYBACK,
                 ntgcalls.MediaDescription(
-                    microphone=None,
-                    speaker=ext_audio,
-                    camera=None, screen=None,
+                    microphone=ntgcalls.AudioDescription(
+                        media_source=ntgcalls.MediaSource.EXTERNAL,
+                        sample_rate=CALL_SAMPLE_RATE,
+                        channel_count=CALL_CHANNELS,
+                        input="",
+                    ),
                 ),
             )
 
-            # Step 9: connect_p2p - hands control to ntgcalls WebRTC engine
-            self._ntg.connect_p2p(
-                peer_id,
-                rtc_servers,
-                CALL_LIBRARY_VERSIONS,
-                call.p2p_allowed,
-            )
+            # Step 10: unmute + resume - without these the call connects
+            # but carries no audio (documented in the proven implementation)
+            await self._ntg_call(self._ntg.unmute, ntg_id)
+            await self._ntg_call(self._ntg.resume, ntg_id)
 
-            # Step 10: Start outbound audio loop
-            out_loop = OutboundAudioLoop(self._ntg, peer_id)
+            # Step 11: Start outbound audio loop (doubles as silence keepalive -
+            # 2-3s without frames would trigger PhoneCallDiscarded)
+            out_loop = OutboundAudioLoop(self._ntg, ntg_id)
             session.start_audio(out_loop)
 
             log.info("[CALL] P2P connected - bidirectional audio active for user_id=%s", peer_id)
@@ -898,22 +1017,23 @@ class CallHandler:
 def _build_rtc_servers(call: PhoneCall) -> list:
     """
     Convert Telegram PhoneCall connection endpoints to ntgcalls RTCServer objects.
-    PhoneCall.connection  - primary PhoneConnection
-    PhoneCall.alternative_connections - list of PhoneConnection
+    PhoneCall.connections is the endpoint list (PhoneConnection / PhoneConnectionWebrtc).
+    RTCServer requires the tcp argument; peer_tag is needed for reflector relays.
     """
     servers = []
-    connections = [call.connection] + list(call.alternative_connections or [])
-    for conn in connections:
+    for conn in (getattr(call, "connections", None) or []):
         try:
             srv = ntgcalls.RTCServer(
                 id=conn.id,
-                ipv4=conn.ip or "",
-                ipv6=conn.ipv6 or "",
+                ipv4=conn.ip if hasattr(conn, "ip") else conn.ipv4,
+                ipv6=getattr(conn, "ipv6", "") or "",
                 port=conn.port,
-                username=conn.username or "",
-                password=conn.password or "",
-                turn=getattr(conn, "turn", True),
+                username=getattr(conn, "username", None),
+                password=getattr(conn, "password", None),
+                turn=getattr(conn, "turn", False),
                 stun=getattr(conn, "stun", False),
+                tcp=getattr(conn, "tcp", False),
+                peer_tag=getattr(conn, "peer_tag", None),
             )
             servers.append(srv)
         except Exception as e:

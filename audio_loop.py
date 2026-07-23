@@ -26,15 +26,20 @@ KEY FACTS (from source, not guessed):
   If you set AudioDescription(sample_rate=48000), you get 48kHz int16 LE regardless of
   what sample rate the remote client sends.
 
-  set_stream_sources MUST be called BEFORE connect_p2p:
-    If called after connect_p2p, streams may not be registered in time.
-    Call order: create_p2p_call → init_exchange → set_stream_sources → connect_p2p
+  Stream source ordering (verified against a working implementation):
+    CAPTURE  must be set right after create_p2p_call, BEFORE init_exchange.
+    PLAYBACK must be set AFTER connect_p2p - only then does on_frames deliver
+    inbound frames. Then unmute + resume, or the call connects without audio.
+    Call order: create_p2p_call → set CAPTURE → init_exchange → accept
+                → exchange_keys → connect_p2p → set PLAYBACK → unmute/resume
 
   CAPTURE  mode = what WE send (outbound, microphone direction)
-  PLAYBACK mode = what WE receive (inbound, speaker direction = caller's voice)
+  PLAYBACK mode = what WE receive (inbound = caller's voice)
 
   send_external_frame only works for CAPTURE (outbound).
-  on_frames only fires for PLAYBACK (inbound) when MediaSource.EXTERNAL is set on speaker.
+  on_frames fires for PLAYBACK (inbound) when MediaSource.EXTERNAL is set on the
+  microphone slot of the PLAYBACK MediaDescription (inbound frames then arrive
+  as device=MICROPHONE, mode=PLAYBACK).
 
   send_external_frame:
     StreamManager::sendExternalFrame checks: externalReaders.contains(device)
@@ -105,33 +110,32 @@ def rms_db(audio: np.ndarray) -> float:
     return 20.0 * np.log10(max(rms, 1e-10))
 
 
-def configure_stream_sources(ntg: ntgcalls.NTgCalls, user_id: int) -> None:
-    ext_audio = ntgcalls.AudioDescription(
+def _external_audio() -> ntgcalls.AudioDescription:
+    return ntgcalls.AudioDescription(
         media_source  = ntgcalls.MediaSource.EXTERNAL,
         sample_rate   = CALL_SR,
         channel_count = CALL_CHANNELS,
         input         = "",
-        keep_open     = False,
     )
+
+
+def configure_capture(ntg: ntgcalls.NTgCalls, user_id: int) -> None:
+    """Outbound stream source. Call right after create_p2p_call, BEFORE init_exchange."""
     ntg.set_stream_sources(
         user_id,
         ntgcalls.StreamMode.CAPTURE,
-        ntgcalls.MediaDescription(
-            microphone = ext_audio,
-            speaker    = None,
-            camera     = None,
-            screen     = None,
-        ),
+        ntgcalls.MediaDescription(microphone=_external_audio()),
     )
+
+
+def configure_playback(ntg: ntgcalls.NTgCalls, user_id: int) -> None:
+    """Inbound stream source. Call AFTER connect_p2p - earlier and on_frames stays silent.
+    Note: PLAYBACK also uses the microphone slot; inbound frames arrive as
+    device=MICROPHONE, mode=PLAYBACK."""
     ntg.set_stream_sources(
         user_id,
         ntgcalls.StreamMode.PLAYBACK,
-        ntgcalls.MediaDescription(
-            microphone = None,
-            speaker    = ext_audio,
-            camera     = None,
-            screen     = None,
-        ),
+        ntgcalls.MediaDescription(microphone=_external_audio()),
     )
 
 
@@ -311,7 +315,9 @@ def _example_full_call_wiring():
     import ntgcalls
     ntg     = ntgcalls.NTgCalls()
     user_id = 123456789
-    configure_stream_sources(ntg, user_id)
+    # CAPTURE here (before init_exchange/accept); PLAYBACK only AFTER
+    # connect_p2p, followed by unmute + resume - see module docstring.
+    configure_capture(ntg, user_id)
 
     def my_stt_pipeline(utt_48k_f32: np.ndarray):
         audio_16k = resample(utt_48k_f32, CALL_SR, WHISPER_SR)

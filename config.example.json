@@ -9,7 +9,7 @@
   "whisper_model": "large-v3",
   "device":        "cuda",
 
-  "speaker_wav":   "your_speaker_sample.wav",
+  "speaker_wav":   "voice.wav",
   "language":      "de",
 
   "_comment_pipeline": "Brain selection: 'echo' repeats what you said, 'ollama' answers via a local Ollama model.",

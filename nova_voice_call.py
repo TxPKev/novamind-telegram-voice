@@ -13,9 +13,9 @@ callbacks for 1-on-1 calls in its stable release. We bypass it entirely.
 Audio path:
   Inbound:  ntgcalls on_frames() callback -> 48kHz int16 PCM bytes
             -> float32 -> VAD -> Whisper (16kHz) -> pipeline -> response text
-  Outbound: XTTS inference_stream() -> 24kHz float32
+  Outbound: XTTS inference() -> 24kHz float32 (full utterance)
             -> resample 48kHz -> int16 PCM bytes
-            -> ntgcalls send_external_frame() every 10ms
+            -> outbound loop paces ntgcalls send_external_frame() every 10ms
 
 Signaling path (MTProto, via Telethon):
   UpdatePhoneCall / PhoneCallRequested
@@ -30,7 +30,7 @@ Architecture:
   -> ntgcalls handles WebRTC/SRTP transport (native C++)
   -> VAD + Whisper transcribes inbound audio
   -> Pipeline (or stub) generates response
-  -> XTTS streams response audio back into call
+  -> XTTS synthesises the response; outbound loop paces it into the call
 
 Why ntgcalls and not Telethon alone:
   Telegram voice call audio is WebRTC/SRTP - it is peer-to-peer between clients.
@@ -327,9 +327,9 @@ class WhisperSTT:
 
 class XTTSStreamer:
     """
-    XTTS-v2 via inference_stream().
-    First audio chunk in ~200ms on RTX 3070.
-    Output: 24kHz float32 chunks.
+    XTTS-v2 speech synthesis. Uses the non-streaming inference() (see stream()
+    for why streaming is avoided). Output: 24kHz float32, one utterance per call;
+    the outbound loop paces it into 10 ms frames.
     """
 
     MODEL_NAME = "tts_models/multilingual/multi-dataset/xtts_v2"

@@ -12,6 +12,10 @@ faster-whisper>=1.0.0,<2.0.0
 
 TTS==0.22.0
 
+# TTS 0.22.0 needs transformers, but is installed with --no-deps (see README),
+# so pin it explicitly. 4.46.3 works; newer versions break XTTS inference.
+transformers==4.46.3
+
 numpy>=1.26.0,<2.0.0
 scipy>=1.13.0,<2.0.0
 soundfile>=0.12.1,<1.0.0

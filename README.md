@@ -4,7 +4,7 @@ A locally running, offline AI – reachable via Telegram voice call (pure voice 
 <img width="192" height="240" alt="image" src="https://github.com/user-attachments/assets/9633a78e-22b6-4487-94c3-5b4ea4cedc5d" />
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
-[![Python 3.11](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/)
+[![Tested on Python 3.11](https://img.shields.io/badge/Python-tested%20on%203.11-blue.svg)](https://www.python.org/)
 [![Platform: Windows x64](https://img.shields.io/badge/Platform-Windows%20x64-lightgrey.svg)]()
 [![CUDA: 12.1](https://img.shields.io/badge/CUDA-12.1-76b900.svg)]()
 [![Status: Development](https://img.shields.io/badge/Status-Development-orange.svg)]()
@@ -40,7 +40,7 @@ Default pipeline: inbound PCM is routed through VAD and Whisper, response text i
 | Clean call teardown (no lingering process, verified) | ✅ Working |
 | Out-of-process call worker (process isolation) | ✅ Working |
 
-**About inbound audio and [ntgcalls#44](https://github.com/pytgcalls/ntgcalls/issues/44):** with the naive setup order, ntgcalls 2.1.0 delivers no `on_frames` callbacks for private 1-on-1 P2P calls — that dead end is what the upstream issue describes. It turns out to be avoidable with unmodified ntgcalls 2.1.0 by getting the call-setup sequence right, which this repo implements: set the CAPTURE stream source immediately after `create_p2p_call` (before the key exchange), set the PLAYBACK stream source only **after** `connect_p2p` (on the `microphone` slot — inbound frames arrive as `device=MICROPHONE, mode=PLAYBACK`), then `unmute` + `resume`, and keep a continuous outbound frame stream (silence when idle). With that ordering, inbound frames flow and Whisper transcribes the caller. Verified in daily use in the system this bridge was extracted from.
+**Inbound audio works with unmodified ntgcalls 2.1.0 — the decisive detail is the call-setup ordering.** Set the CAPTURE stream source immediately after `create_p2p_call` (before the key exchange), set the PLAYBACK stream source only **after** `connect_p2p` (on the `microphone` slot — inbound frames arrive as `device=MICROPHONE, mode=PLAYBACK`), then `unmute` + `resume`, and keep a continuous outbound frame stream (silence when idle). With that ordering, `on_frames` delivers the caller's audio and Whisper transcribes it — verified in daily use in the system this bridge was extracted from. What this ordering avoids is the dead end described in [ntgcalls#44](https://github.com/pytgcalls/ntgcalls/issues/44): with the *naive* setup order, ntgcalls 2.1.0 delivers no `on_frames` callbacks for private 1-on-1 P2P calls. Get the sequence right and it does.
 
 **Note on XTTS speech-out:** use XTTS `inference()`, not `inference_stream()` — the streaming path is broken with `transformers` 4.46.3 (it raises `'int' object has no attribute 'device'`). The non-streaming call works and the outbound loop paces the result into 10 ms frames.
 
@@ -104,7 +104,7 @@ flowchart LR
 
 - Windows x86_64
 - NVIDIA GPU with CUDA 12.1 (tested on RTX 3070, 8 GB VRAM)
-- Python 3.11 (what this was built and verified on)
+- Tested on Python 3.11 (newer versions likely work; 3.11 is what this was verified on)
 - Telegram account with `api_id` / `api_hash` from [my.telegram.org/apps](https://my.telegram.org/apps)
 
 ---
@@ -203,7 +203,7 @@ Install Telegram on your phone with a second SIM / spare number. This account wi
 
 Go to `my.telegram.org/apps`, log in with the spare account's number, and create an app. Note down `api_id` and `api_hash`.
 
-### Step 3 — Install Python 3.11
+### Step 3 — Install Python (tested on 3.11)
 
 From python.org. During installation, tick "Add Python to PATH".
 

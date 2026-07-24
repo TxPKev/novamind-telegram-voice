@@ -1,6 +1,6 @@
-#p2p-offline-ai-telegram-bridge
+# p2p-offline-ai-telegram-bridge
 
-A locally running, offline AI – reachable via Telegram voice call (pure voice bridge, no bot). It answers calls, detects motion at the door and sends a live image – all deterministic, on own hardware, without cloud.
+A locally running, offline AI – reachable via Telegram voice call (pure voice bridge, no bot). It answers calls, hears you and talks back – all deterministic, on own hardware, without cloud.
 <img width="192" height="240" alt="image" src="https://github.com/user-attachments/assets/9633a78e-22b6-4487-94c3-5b4ea4cedc5d" />
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
@@ -11,9 +11,9 @@ A locally running, offline AI – reachable via Telegram voice call (pure voice 
 
 Low-level integration of Telegram P2P voice calls with external PCM audio sources. Built directly on Telethon (MTProto signaling) and ntgcalls (WebRTC transport) — no high-level wrappers.
 
-> **License: AGPL-3.0.** If you build this bridge into a network-accessible service, your service source must be published under the same license, with NovaMind Studios credited as the source. Details in the [License](#license) section.
+> **License: AGPL-3.0.** If you build this bridge into a network-accessible service, your service source must be published under the same license, with NovaMind Studio credited as the source. Details in the [License](#license) section.
 
-![Offline AI + Telegram — quickstart in 6 steps (German / English)](quickstart.png)
+![Offline AI + Telegram — quickstart (German / English)](quickstart.png)
 
 **Setup in short:** get your `api_id` and `api_hash` from **[my.telegram.org/apps](https://my.telegram.org/apps)**, put them into `config.json`, then follow the [step-by-step guide](#test-it-with-your-own-offline-model-ollama) below. You call the AI's Telegram number, it answers and talks back.
 
@@ -42,7 +42,7 @@ Default pipeline: inbound PCM is routed through VAD and Whisper, response text i
 
 **Inbound audio works with unmodified ntgcalls 2.1.0 — the decisive detail is the call-setup ordering.** Set the CAPTURE stream source immediately after `create_p2p_call` (before the key exchange), set the PLAYBACK stream source only **after** `connect_p2p` (on the `microphone` slot — inbound frames arrive as `device=MICROPHONE, mode=PLAYBACK`), then `unmute` + `resume`, and keep a continuous outbound frame stream (silence when idle). With that ordering, `on_frames` delivers the caller's audio and Whisper transcribes it — verified in daily use in the system this bridge was extracted from. What this ordering avoids is the dead end described in [ntgcalls#44](https://github.com/pytgcalls/ntgcalls/issues/44): with the *naive* setup order, ntgcalls 2.1.0 delivers no `on_frames` callbacks for private 1-on-1 P2P calls. Get the sequence right and it does.
 
-**Note on XTTS speech-out:** use XTTS `inference()`, not `inference_stream()` — the streaming path is broken with `transformers` 4.46.3 (it raises `'int' object has no attribute 'device'`). The non-streaming call works and the outbound loop paces the result into 10 ms frames.
+**Note on XTTS speech-out:** use XTTS `inference()`, not `inference_stream()` — even on the pinned `transformers` 4.46.3 the streaming path raises `'int' object has no attribute 'device'`. The non-streaming call works and the outbound loop paces the result into 10 ms frames.
 
 **Fixed: lingering call process (July 2026).** Problem: after a call ended, the process hosting ntgcalls kept running with roughly 2 GB of memory still allocated. Cause: the native ntgcalls/WebRTC transport does not fully release its resources inside the host process after teardown. Fix: the call transport now runs in a dedicated out-of-process worker that is terminated when the call ends, which guarantees complete resource release — verified over repeated calls in both directions with zero leftover processes. The worker implementation lives in the integrating system, not in this proof-of-concept repository; it is a teardown/cleanup mechanism and is **not** required for inbound audio.
 
@@ -140,7 +140,13 @@ pip install TTS==0.22.0 --no-deps
 cp config.example.json config.json
 ```
 
-Edit `config.json` with your Telegram `api_id`, `api_hash`, phone number, and a path to a 6–30 second WAV speaker reference for XTTS voice cloning.
+Edit `config.json` with:
+
+- `api_id` and `api_hash` from [my.telegram.org/apps](https://my.telegram.org/apps)
+- your `phone` number, with country code
+- `speaker_wav`: path to a 6–30 second WAV speaker reference for XTTS voice cloning
+- `pipeline`: `"echo"` (default stub) or `"ollama"` (local LLM)
+- `ollama_model`: the model tag to use, e.g. `"qwen2.5:3b"`
 
 ---
 
@@ -277,11 +283,11 @@ Both directions work: the AI hears you (your speech is transcribed locally by Wh
 **AGPL-3.0** — see [LICENSE](LICENSE). This is a strong copyleft license, and it is the condition for using this code:
 
 - If you integrate this bridge into any **network-accessible service** (a bot, a hosted assistant, a call gateway), you must make **your own service's source code** available under AGPL-3.0 as well.
-- You must retain the license and attribute **NovaMind Studios** as the source of the bridge.
+- You must retain the license and attribute **NovaMind Studio** as the source of the bridge.
 - There is no closed-source or proprietary use of this bridge in networked services — if you need different terms, contact the address below.
 
 ---
 
-NovaMind Studios — Niedergösgen, Switzerland  
+NovaMind Studio — Niedergösgen, Switzerland  
 ki27@ik.me  
-[txpkev.github.io/NOVAMINDSTUDIO](https://txpkev.github.io/novamindstudio)
+[txpkev.github.io/novamindstudio](https://txpkev.github.io/novamindstudio)

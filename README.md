@@ -13,6 +13,10 @@ Low-level integration of Telegram P2P voice calls with external PCM audio source
 
 > **License: AGPL-3.0.** If you build this bridge into a network-accessible service, your service source must be published under the same license, with NovaMind Studios credited as the source. Details in the [License](#license) section.
 
+![Offline AI + Telegram — quickstart in 6 steps (German / English)](quickstart.png)
+
+**Setup in short:** get your `api_id` and `api_hash` from **[my.telegram.org/apps](https://my.telegram.org/apps)**, put them into `config.json`, then follow the [step-by-step guide](#test-it-with-your-own-offline-model-ollama) below. You call the AI's Telegram number, it answers and talks back.
+
 ---
 
 ## What this is

@@ -4,7 +4,7 @@ A locally running, offline AI – reachable via Telegram voice call (pure voice 
 <img width="192" height="240" alt="image" src="https://github.com/user-attachments/assets/9633a78e-22b6-4487-94c3-5b4ea4cedc5d" />
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Python 3.11](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/)
 [![Platform: Windows x64](https://img.shields.io/badge/Platform-Windows%20x64-lightgrey.svg)]()
 [![CUDA: 12.1](https://img.shields.io/badge/CUDA-12.1-76b900.svg)]()
 [![Status: Development](https://img.shields.io/badge/Status-Development-orange.svg)]()
@@ -104,7 +104,7 @@ flowchart LR
 
 - Windows x86_64
 - NVIDIA GPU with CUDA 12.1 (tested on RTX 3070, 8 GB VRAM)
-- Python 3.10 or newer
+- Python 3.11 (what this was built and verified on)
 - Telegram account with `api_id` / `api_hash` from [my.telegram.org/apps](https://my.telegram.org/apps)
 
 ---
@@ -203,7 +203,7 @@ Install Telegram on your phone with a second SIM / spare number. This account wi
 
 Go to `my.telegram.org/apps`, log in with the spare account's number, and create an app. Note down `api_id` and `api_hash`.
 
-### Step 3 — Install Python 3.10 or newer
+### Step 3 — Install Python 3.11
 
 From python.org. During installation, tick "Add Python to PATH".
 
@@ -212,8 +212,8 @@ From python.org. During installation, tick "Add Python to PATH".
 Green "Code" button → "Download ZIP" → unpack it. Or, with Git installed:
 
 ```
-git clone https://github.com/TxPKev/ari-telegram-voice.git
-cd ari-telegram-voice
+git clone https://github.com/TxPKev/p2p-offline-ai-telegram-bridge.git
+cd p2p-offline-ai-telegram-bridge
 ```
 
 ### Step 5 — Install the Python packages, in exactly this order

@@ -1,27 +1,55 @@
 # p2p-offline-ai-telegram-bridge
 
-A locally running, offline AI – reachable via Telegram voice call (pure voice bridge, no bot). It answers calls, hears you and talks back – all deterministic, on own hardware, without cloud.
-<img width="192" height="240" alt="image" src="https://github.com/user-attachments/assets/9633a78e-22b6-4487-94c3-5b4ea4cedc5d" />
+A locally running AI you can phone. Telegram voice call in, synthesised speech out — a pure voice bridge, not a bot. It answers, hears you and talks back, entirely on your own hardware, with no cloud service anywhere in the audio path.
 
-[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
-[![Tested on Python 3.11](https://img.shields.io/badge/Python-tested%20on%203.11-blue.svg)](https://www.python.org/)
-[![Platform: Windows x64](https://img.shields.io/badge/Platform-Windows%20x64-lightgrey.svg)]()
-[![CUDA: 12.1](https://img.shields.io/badge/CUDA-12.1-76b900.svg)]()
-[![Status: Development](https://img.shields.io/badge/Status-Development-orange.svg)]()
+<img width="192" height="240" alt="AI you can phone" src="https://github.com/user-attachments/assets/9633a78e-22b6-4487-94c3-5b4ea4cedc5d" />
+
+![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)
+![Python](https://img.shields.io/badge/Python-tested%20on%203.11-green.svg)
+![Platform](https://img.shields.io/badge/Platform-Windows%20x64-lightgrey.svg)
+![CUDA](https://img.shields.io/badge/CUDA-12.1-76B900.svg)
+![Status](https://img.shields.io/badge/Status-Development-orange.svg)
 
 Low-level integration of Telegram P2P voice calls with external PCM audio sources. Built directly on Telethon (MTProto signaling) and ntgcalls (WebRTC transport) — no high-level wrappers.
 
 > **License: AGPL-3.0.** If you build this bridge into a network-accessible service, your service source must be published under the same license, with NovaMind Studio credited as the source. Details in the [License](#license) section.
 
+---
+
+## Where this comes from
+
+This is not a weekend demo. It is the telephony layer of a larger offline system that has been in daily use for months, extracted so that it runs on its own with no dependency on the rest of that system.
+
+That matters for two reasons. Every filled-in figure in the table below was measured on live calls on the hardware listed — not estimated, not copied from documentation. And the ntgcalls facts in `audio_loop.py` — the 10 ms frame timing, the `on_frames` callback signature — were taken from the ntgcalls C++ source rather than found by trial and error; the file cites the source file for each, so you can check them yourself.
+
+**What "deterministic" means here, precisely.** It refers to the transport path, not the content: a fixed frame size (960 bytes at 48 kHz mono), a fixed sample rate, and one single route through the pipeline. The same call takes the same path every time, and every stage leaves a trace in the log. It does **not** mean the output is bit-identical — XTTS samples when it synthesises, so the exact waveform varies from call to call — nor that the system always understands you. And a language model plugged in as the brain (the Ollama option below) is not deterministic at all. The plumbing is fixed; the voice and the brain are your choice, and neither of them is.
+
+### Measured
+
+| Stage | Measured | Conditions |
+|---|---|---|
+| Speech in to voice out, round trip | — | not yet measured rigorously |
+| Speech recognition | ~0.7–1.6 s per utterance | faster-whisper large-v3, RTX 3070 |
+| Voice synthesis, first audio out | ~0.9–2.3 s | XTTS-v2, RTX 3070, varies with sentence length |
+| Continuous call, leftover processes | 0 | verified over repeated calls, both directions |
+
+Hardware: NVIDIA RTX 3070 (8 GB VRAM), Windows x64, CUDA 12.1, Python 3.11.
+
+Built by **NovaMind Studio**, Switzerland.
+
+---
+
+## Offline AI + Telegram — quickstart (German / English)
+
 ![Offline AI + Telegram — quickstart (German / English)](quickstart.png)
 
-**Setup in short:** get your `api_id` and `api_hash` from **[my.telegram.org/apps](https://my.telegram.org/apps)**, put them into `config.json`, then follow the [step-by-step guide](#test-it-with-your-own-offline-model-ollama) below. You call the AI's Telegram number, it answers and talks back.
+**Setup in short:** get your `api_id` and `api_hash` from [my.telegram.org/apps](https://my.telegram.org/apps), put them into `config.json`, then follow the step-by-step guide below. You call the AI's Telegram number, it answers and talks back.
 
 ---
 
 ## What this is
 
-A working proof-of-concept for handling **private 1-on-1 Telegram voice calls** with raw PCM access in both directions. The high-level wrapper `py-tgcalls` does not expose private calls or raw audio callbacks for 1-on-1 sessions in its stable release, so this project bypasses it and uses ntgcalls' native pybind11 bindings directly.
+A working proof-of-concept for handling private 1-on-1 Telegram voice calls with raw PCM access in both directions. The high-level wrapper `py-tgcalls` does not expose private calls or raw audio callbacks for 1-on-1 sessions in its stable release, so this project bypasses it and uses ntgcalls' native pybind11 bindings directly.
 
 Default pipeline: inbound PCM is routed through VAD and Whisper, response text is generated by a local pipeline (echo stub or a local Ollama model), and XTTS-v2 synthesises outbound PCM back into the call. Both directions work — the decisive detail is the call-setup ordering, see the inbound-audio note below.
 
@@ -35,20 +63,37 @@ Default pipeline: inbound PCM is routed through VAD and Whisper, response text i
 | DH key exchange (Telethon ↔ ntgcalls) | ✅ Working |
 | WebRTC P2P connection (CONNECTED state) | ✅ Working |
 | Bidirectional MTProto signaling relay | ✅ Working |
-| **Outbound audio** (`send_external_frame`, XTTS synthesis) | ✅ Working |
-| **Inbound audio** (`on_frames`, caller's voice → Whisper) | ✅ Working — requires the call-setup ordering below |
+| Outbound audio (send_external_frame, XTTS synthesis) | ✅ Working |
+| Inbound audio (on_frames, caller's voice → Whisper) | ✅ Working — requires the call-setup ordering below |
 | Clean call teardown (no lingering process, verified) | ✅ Working |
 | Out-of-process call worker (process isolation) | ✅ Working |
 
-**Inbound audio works with unmodified ntgcalls 2.1.0 — the decisive detail is the call-setup ordering.** Set the CAPTURE stream source immediately after `create_p2p_call` (before the key exchange), set the PLAYBACK stream source only **after** `connect_p2p` (on the `microphone` slot — inbound frames arrive as `device=MICROPHONE, mode=PLAYBACK`), then `unmute` + `resume`, and keep a continuous outbound frame stream (silence when idle). With that ordering, `on_frames` delivers the caller's audio and Whisper transcribes it — verified in daily use in the system this bridge was extracted from. What this ordering avoids is the dead end described in [ntgcalls#44](https://github.com/pytgcalls/ntgcalls/issues/44): with the *naive* setup order, ntgcalls 2.1.0 delivers no `on_frames` callbacks for private 1-on-1 P2P calls. Get the sequence right and it does.
+### Inbound audio — the call-setup ordering
 
-**Note on XTTS speech-out:** use XTTS `inference()`, not `inference_stream()` — even on the pinned `transformers` 4.46.3 the streaming path raises `'int' object has no attribute 'device'`. The non-streaming call works and the outbound loop paces the result into 10 ms frames.
+Inbound audio works with **unmodified ntgcalls 2.1.0**. The decisive detail is the order of the setup calls:
 
-**Fixed: lingering call process (July 2026).** Problem: after a call ended, the process hosting ntgcalls kept running with roughly 2 GB of memory still allocated. Cause: the native ntgcalls/WebRTC transport does not fully release its resources inside the host process after teardown. Fix: the call transport now runs in a dedicated out-of-process worker that is terminated when the call ends, which guarantees complete resource release — verified over repeated calls in both directions with zero leftover processes. The worker implementation lives in the integrating system, not in this proof-of-concept repository; it is a teardown/cleanup mechanism and is **not** required for inbound audio.
+1. `create_p2p_call`
+2. set the **CAPTURE** stream source immediately after, before the key exchange
+3. `connect_p2p`
+4. set the **PLAYBACK** stream source only now, on the **microphone slot** — inbound frames arrive as `device=MICROPHONE`, `mode=PLAYBACK`
+5. `unmute`
+6. `resume`
+
+And keep a **continuous outbound frame stream** running throughout, silence frames when idle. If the outbound side goes quiet, the return path never opens.
+
+With that ordering, `on_frames` delivers the caller's audio and Whisper transcribes it — verified in daily use in the system this bridge was extracted from.
+
+What this ordering avoids is the dead end described in [ntgcalls#44](https://github.com/pytgcalls/ntgcalls/issues/44): with the naive setup order, ntgcalls 2.1.0 delivers no `on_frames` callbacks for private 1-on-1 P2P calls. Get the sequence right and it does.
+
+**Note on XTTS speech-out:** use XTTS `inference()`, not `inference_stream()` — even on the pinned `transformers 4.46.3` the streaming path raises `'int' object has no attribute 'device'`. The non-streaming call works and the outbound loop paces the result into 10 ms frames.
+
+**Fixed: lingering call process (July 2026).** After a call ended, the process hosting ntgcalls kept running with roughly 2 GB of memory still allocated. Cause: the native ntgcalls/WebRTC transport does not fully release its resources inside the host process after teardown. Fix: the call transport now runs in a dedicated out-of-process worker that is terminated when the call ends, which guarantees complete resource release — verified over repeated calls in both directions with zero leftover processes. The worker implementation lives in the integrating system, not in this proof-of-concept repository; it is a teardown/cleanup mechanism and is not required for inbound audio.
+
+---
 
 ## Scope
 
-This project does:
+**This project does:**
 
 - Auto-answer Telegram P2P voice calls
 - Stream synthesised audio into the call (outbound)
@@ -56,7 +101,7 @@ This project does:
 - Provide a verified raw-PCM I/O contract for ntgcalls 2.1.0
 - Offer a clean integration point for any local STT / LLM / TTS pipeline
 
-This project does NOT:
+**This project does NOT:**
 
 - Record, store or relay any conversation content
 - Bypass any Telegram security mechanism
@@ -66,29 +111,6 @@ This project does NOT:
 ---
 
 ## Architecture
-
-```mermaid
-flowchart LR
-    Caller([Caller<br/>Telegram App])
-    Tele[Telethon<br/>MTProto signaling]
-    NTG[ntgcalls<br/>WebRTC / SRTP]
-    VAD[Energy VAD<br/>48 kHz]
-    STT[Whisper Large-v3<br/>16 kHz]
-    PIPE[Pipeline stub<br/>or your code]
-    TTS[XTTS-v2<br/>24 kHz]
-    OUT[Outbound loop<br/>10 ms frames]
-
-    Caller -.->|DH handshake| Tele
-    Tele -->|AcceptCallRequest| NTG
-    Caller ==>|inbound PCM| NTG
-    NTG ==>|on_frames| VAD
-    VAD ==>|utterance| STT
-    STT ==>|text| PIPE
-    PIPE ==>|response| TTS
-    TTS ==>|24 kHz chunks| OUT
-    OUT ==>|send_external_frame| NTG
-    NTG ==>|outbound PCM| Caller
-```
 
 | Layer | Library | Responsibility |
 |---|---|---|
@@ -111,7 +133,7 @@ flowchart LR
 
 ## Install
 
-The install order matters. `pip install -r requirements.txt` alone will let Coqui TTS pull its own torch wheel and silently downgrade your CUDA build. Follow these steps in order.
+**The install order matters.** `pip install -r requirements.txt` alone will let Coqui TTS pull its own torch wheel and silently downgrade your CUDA build. Follow these steps in order.
 
 ```bash
 python -m pip install --upgrade pip setuptools wheel
@@ -121,16 +143,14 @@ pip install torch==2.5.1+cu121 torchaudio==2.5.1+cu121 \
 
 pip install ntgcalls==2.1.0 --no-deps
 pip install "Telethon>=1.36.0,<2.0.0" cryptg --no-deps
-
 pip install "faster-whisper>=1.0.0,<2.0.0" "numpy>=1.26.0,<2.0.0" "scipy>=1.13.0,<2.0.0" "soundfile>=0.12.1,<1.0.0"
-
 # transformers must be pinned - TTS is installed --no-deps below, and newer
 # transformers breaks XTTS synthesis ('int' object has no attribute 'device').
 pip install transformers==4.46.3
 pip install TTS==0.22.0 --no-deps
 ```
 
-> **Why `--no-deps` everywhere:** Coqui TTS, faster-whisper and ntgcalls all declare loose torch dependencies. Without `--no-deps`, pip will silently downgrade your CUDA-enabled torch to the CPU build, breaking GPU inference. This is not optional on Windows + CUDA 12.1.
+**Why `--no-deps` everywhere:** Coqui TTS, faster-whisper and ntgcalls all declare loose torch dependencies. Without `--no-deps`, pip will silently downgrade your CUDA-enabled torch to the CPU build, breaking GPU inference. This is not optional on Windows + CUDA 12.1.
 
 ---
 
@@ -172,13 +192,13 @@ On first run, Telethon will prompt for the SMS code Telegram sends to your phone
 | Whisper sample rate | 16 000 Hz (resampled internally) |
 | XTTS sample rate | 24 000 Hz (resampled to 48 kHz before send) |
 
-> **Note on frame size:** ntgcalls 2.1.0 `AudioSink.frameTime()` is **10 ms**, not 20 ms (a common misconception). Sending 20 ms frames causes jitter buffer underruns. Verified against `ntgcalls/src/media/audio_sink.cpp`.
+**Note on frame size:** ntgcalls 2.1.0 `AudioSink.frameTime()` is 10 ms, not 20 ms (a common misconception). Sending 20 ms frames causes jitter buffer underruns. Verified against `ntgcalls/src/media/audio_sink.cpp`.
 
 ---
 
 ## Custom pipeline
 
-**This bridge is the telephony layer — the "brain" is swappable.** Bring your own offline model: anything with a `process(text) -> text` interface plugs in. The default `EchoPipeline` just repeats what you said; `OllamaPipeline` (below) connects a real local LLM.
+This bridge is the telephony layer — the "brain" is swappable and deliberately kept out of this repository. Bring your own offline model: anything with a `process(text) -> text` interface plugs in. The default `EchoPipeline` just repeats what you said; `OllamaPipeline` (below) connects a real local LLM as a working example.
 
 Replace `EchoPipeline` in `nova_voice_call.py` with your own logic:
 
@@ -196,7 +216,7 @@ The pipeline runs in a thread pool — non-blocking with respect to the audio I/
 
 ### Before you start — what you actually need
 
-- A Windows PC with an NVIDIA graphics card, ~8 GB VRAM (tested on RTX 3070). The voice models are heavy. This will not run on a normal laptop, and not on a Mac.
+- **A Windows PC with an NVIDIA graphics card, ~8 GB VRAM** (tested on RTX 3070). The voice models are heavy. This will not run on a normal laptop, and not on a Mac.
 - **Two Telegram accounts.** One runs the bridge (the one being called), one calls from. You cannot easily call yourself.
 - **Do not use your main Telegram account for the bridge.** Use a spare account with a second SIM. Auto-answering user accounts can get flagged by Telegram.
 - **A BotFather bot will not work.** Telegram bots cannot make or receive voice calls at all — the bot system has no calling. This project logs in as a real user account.
@@ -207,17 +227,17 @@ Install Telegram on your phone with a second SIM / spare number. This account wi
 
 ### Step 2 — Get your API credentials
 
-Go to `my.telegram.org/apps`, log in with the spare account's number, and create an app. Note down `api_id` and `api_hash`.
+Go to [my.telegram.org/apps](https://my.telegram.org/apps), log in with the spare account's number, and create an app. Note down `api_id` and `api_hash`.
 
 ### Step 3 — Install Python (tested on 3.11)
 
-From python.org. During installation, tick "Add Python to PATH".
+From [python.org](https://www.python.org/downloads/). During installation, tick **"Add Python to PATH"**.
 
 ### Step 4 — Download this repository
 
-Green "Code" button → "Download ZIP" → unpack it. Or, with Git installed:
+Green **"Code"** button → **"Download ZIP"** → unpack it. Or, with Git installed:
 
-```
+```bash
 git clone https://github.com/TxPKev/p2p-offline-ai-telegram-bridge.git
 cd p2p-offline-ai-telegram-bridge
 ```
@@ -226,11 +246,9 @@ cd p2p-offline-ai-telegram-bridge
 
 Order matters. Installing them any other way lets Coqui TTS silently replace your GPU-enabled torch with the CPU version, and nothing will work.
 
-```
+```bash
 python -m pip install --upgrade pip setuptools wheel
-
 pip install torch==2.5.1+cu121 torchaudio==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
-
 pip install ntgcalls==2.1.0 --no-deps
 pip install "Telethon>=1.36.0,<2.0.0" cryptg --no-deps
 pip install "faster-whisper>=1.0.0,<2.0.0" "numpy>=1.26.0,<2.0.0" "scipy>=1.13.0,<2.0.0" "soundfile>=0.12.1,<1.0.0"
@@ -242,27 +260,29 @@ Pin `transformers==4.46.3` — a newer version makes XTTS crash with `'int' obje
 
 ### Step 6 — Install Ollama and pull a model
 
-Download Ollama from `ollama.com`, install it, then in a terminal:
+Download Ollama from [ollama.com](https://ollama.com), install it, then in a terminal:
 
-```
+```bash
 ollama pull qwen2.5:3b
 ```
 
 Leave Ollama running in the background.
+
+This is an example brain, not the point of the project. Any local model with a `process(text) -> text` interface works just as well — see [Custom pipeline](#custom-pipeline).
 
 ### Step 7 — Create your config file
 
 Copy `config.example.json` to `config.json` and open it in a text editor. Fill in:
 
 - `api_id` and `api_hash` from Step 2
-- your spare account's `phone` number, with country code
+- your spare account's phone number, with country code
 - `speaker_wav`: path to a 6–30 second WAV recording of a voice — this is the voice the AI will speak with
 - `pipeline`: change from `"echo"` to `"ollama"`
 - `ollama_model`: `"qwen2.5:3b"`
 
 ### Step 8 — Start it
 
-```
+```bash
 python nova_voice_call.py
 ```
 
@@ -274,7 +294,19 @@ From your other Telegram account, place a normal Telegram voice call to the spar
 
 ### What works and what doesn't
 
-Both directions work: the AI hears you (your speech is transcribed locally by Whisper) and talks back. If the call connects but the AI does not react to your voice, check the log for `Connection state: CONNECTED` and `[VAD] Utterance detected` lines — and speak clearly for at least a second; very short fragments are ignored on purpose. Known rough edge: occasionally an utterance yields an empty transcription; the bridge stays silent in that case instead of guessing.
+Both directions work: the AI hears you (your speech is transcribed locally by Whisper) and talks back.
+
+If the call connects but the AI does not react to your voice, check the log for `Connection state: CONNECTED` and `[VAD] Utterance detected` lines — and speak clearly for at least a second; very short fragments are ignored on purpose.
+
+Known rough edge: occasionally an utterance yields an empty transcription; the bridge stays silent in that case instead of guessing.
+
+---
+
+## Reporting problems
+
+This was verified on the hardware listed above. On different hardware it will behave differently — that has already been demonstrated once by an external tester who found four startup failures that a syntax check had happily passed.
+
+If it fails on your setup, open an issue with your GPU, your CUDA version, your Python version and the log output. Reports get fixed.
 
 ---
 

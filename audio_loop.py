@@ -53,7 +53,7 @@ KEY FACTS (from source, not guessed):
     WebRTC jitter buffer handles minor timing variance.
     Use time.perf_counter() not time.sleep(0.01) for precision.
 
-Author: Kevin Kachramanow / NovaMind Studios
+Author: Kevin Kachramanow / NovaMind Studio
 """
 
 from __future__ import annotations

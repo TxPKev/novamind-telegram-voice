@@ -33,6 +33,8 @@ That matters for two reasons. Every filled-in figure in the table below was meas
 | Voice synthesis, first audio out | ~0.9–2.3 s | XTTS-v2, RTX 3070, varies with sentence length |
 | Continuous call, leftover processes | 0 | verified over repeated calls, both directions |
 
+These are honest figures for Whisper large-v3 and XTTS-v2 on an 8 GB card, not a marketing "near-instant". In a live call the recognition-plus-synthesis gap is a noticeable pause; if you want less latency at the cost of some accuracy, a smaller Whisper model (`medium` / `small`) cuts the recognition time.
+
 Hardware: NVIDIA RTX 3070 (8 GB VRAM), Windows x64, CUDA 12.1, Python 3.11.
 
 Built by **NovaMind Studio**, Switzerland.

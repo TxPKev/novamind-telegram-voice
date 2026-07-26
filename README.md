@@ -85,7 +85,7 @@ And keep a **continuous outbound frame stream** running throughout, silence fram
 
 With that ordering, `on_frames` delivers the caller's audio and Whisper transcribes it — verified in daily use in the system this bridge was extracted from.
 
-What this ordering avoids is the dead end described in [ntgcalls#44](https://github.com/pytgcalls/ntgcalls/issues/44): with the naive setup order, ntgcalls 2.1.0 delivers no `on_frames` callbacks for private 1-on-1 P2P calls. Get the sequence right and it does.
+With the naive setup order, ntgcalls 2.1.0 delivers no `on_frames` callbacks at all for private 1-on-1 P2P calls; get the sequence right and it does. ([ntgcalls#44](https://github.com/pytgcalls/ntgcalls/issues/44) reports a related but *opposite* symptom — **outbound** audio staying silent, sender-side, because the network state is never raised — where the continuous outbound stream above may also play a part. Our problem was the inbound direction.)
 
 **Note on XTTS speech-out:** use XTTS `inference()`, not `inference_stream()` — even on the pinned `transformers 4.46.3` the streaming path raises `'int' object has no attribute 'device'`. The non-streaming call works and the outbound loop paces the result into 10 ms frames.
 

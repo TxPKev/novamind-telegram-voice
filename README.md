@@ -91,6 +91,13 @@ With the naive setup order, ntgcalls 2.1.0 delivers no `on_frames` callbacks at 
 
 **Fixed: lingering call process (July 2026).** After a call ended, the process hosting ntgcalls kept running with roughly 2 GB of memory still allocated. Cause: the native ntgcalls/WebRTC transport does not fully release its resources inside the host process after teardown. Fix: the call transport now runs in a dedicated out-of-process worker that is terminated when the call ends, which guarantees complete resource release — verified over repeated calls in both directions with zero leftover processes. The worker implementation lives in the integrating system, not in this proof-of-concept repository; it is a teardown/cleanup mechanism and is not required for inbound audio.
 
+**If you isolate ntgcalls in a child process, make its death visible.** Putting the call transport in a separate process is a sound way to contain a native fault — we verified with a stand-in child that dies natively (segfault and `abort`) that the parent survives every time and keeps running. But containment is not detection, and the obvious wiring hides the failure in two ways:
+
+- **Drain the child's stderr, or don't pipe it.** If you open `stderr=PIPE` and never read it, a crashing or chatty child fills the OS buffer and blocks there forever. The parent still holds a live process handle and considers the child healthy — you get a silent hang instead of a crash.
+- **Read the exit code, not just "is it gone".** `poll() is not None` tells you the child ended, not *how* it ended. A native fault exits with a distinctive status (on Windows e.g. `0xC0000409`, on POSIX a signal). If your teardown logs "worker stopped" unconditionally, a segfault and a clean shutdown produce the identical line — and you will chase the wrong bug for weeks.
+
+Also arm `faulthandler` inside the child and point it at a file. A native fault then leaves a stack trace behind instead of silence.
+
 ---
 
 ## Scope

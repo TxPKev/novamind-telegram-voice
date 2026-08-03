@@ -87,7 +87,7 @@ With that ordering, `on_frames` delivers the caller's audio and Whisper transcri
 
 With the naive setup order, ntgcalls 2.1.0 delivers no `on_frames` callbacks at all for private 1-on-1 P2P calls; get the sequence right and it does. ([ntgcalls#44](https://github.com/pytgcalls/ntgcalls/issues/44) reports a related but *opposite* symptom — **outbound** audio staying silent, sender-side, because the network state is never raised — where the continuous outbound stream above may also play a part. Our problem was the inbound direction.)
 
-**Note on XTTS speech-out:** use XTTS `inference()`, not `inference_stream()` — even on the pinned `transformers 4.46.3` the streaming path raises `'int' object has no attribute 'device'`. The non-streaming call works and the outbound loop paces the result into 10 ms frames.
+**Note on XTTS speech-out:** this project uses XTTS `inference()`, not `inference_stream()`. On the original `TTS==0.22.0` with `transformers 4.46.3` the streaming path raises `'int' object has no attribute 'device'`; the non-streaming call works, and the outbound loop paces the result into 10 ms frames anyway. That is still what the code does on the current `coqui-tts` install (verified end to end on a clean machine).
 
 **Fixed: lingering call process (July 2026).** After a call ended, the process hosting ntgcalls kept running with roughly 2 GB of memory still allocated. Cause: the native ntgcalls/WebRTC transport does not fully release its resources inside the host process after teardown. Fix: the call transport now runs in a dedicated out-of-process worker that is terminated when the call ends, which guarantees complete resource release — verified over repeated calls in both directions with zero leftover processes. The worker implementation lives in the integrating system, not in this proof-of-concept repository; it is a teardown/cleanup mechanism and is not required for inbound audio.
 
@@ -142,24 +142,34 @@ Also arm `faulthandler` inside the child and point it at a file. A native fault 
 
 ## Install
 
-**The install order matters.** `pip install -r requirements.txt` alone will let Coqui TTS pull its own torch wheel and silently downgrade your CUDA build. Follow these steps in order.
+**The install order matters, and the steps below are the ones that were actually run on a clean machine.** Follow them in order.
+
+Put the project in a **short path** (e.g. `C:\bridge`). Torch ships files with very long names; installed under a deep path, Windows aborts with `No such file or directory: ...torch\include\ATen\ops\...`.
 
 ```bash
-python -m pip install --upgrade pip setuptools wheel
+python -m pip install --upgrade pip "setuptools<81" wheel
 
 pip install torch==2.5.1+cu121 torchaudio==2.5.1+cu121 \
     --index-url https://download.pytorch.org/whl/cu121
 
 pip install ntgcalls==2.1.0 --no-deps
-pip install "Telethon>=1.36.0,<2.0.0" cryptg --no-deps
-pip install "faster-whisper>=1.0.0,<2.0.0" "numpy>=1.26.0,<2.0.0" "scipy>=1.13.0,<2.0.0" "soundfile>=0.12.1,<1.0.0"
-# transformers must be pinned - TTS is installed --no-deps below, and newer
-# transformers breaks XTTS synthesis ('int' object has no attribute 'device').
-pip install transformers==4.46.3
-pip install TTS==0.22.0 --no-deps
+
+pip install -c constraints.txt "Telethon>=1.36.0,<2.0.0" cryptg
+
+pip install -c constraints.txt "faster-whisper==1.1.1" "ctranslate2==4.6.0" \
+    "numpy>=1.26.0,<2.0.0" "scipy>=1.13.0,<2.0.0" "soundfile>=0.12.1,<1.0.0"
+
+pip install -c constraints.txt coqui-tts
 ```
 
-**Why `--no-deps` everywhere:** Coqui TTS, faster-whisper and ntgcalls all declare loose torch dependencies. Without `--no-deps`, pip will silently downgrade your CUDA-enabled torch to the CPU build, breaking GPU inference. This is not optional on Windows + CUDA 12.1.
+**Why `constraints.txt` and not `--no-deps` everywhere.** The danger is real: installing a speech package without care lets pip resolve a CPU torch over your CUDA build and GPU inference dies silently. `--no-deps` prevents that — but it also strips the dependencies a package genuinely needs. Telethon then lacks `pyaes` and `rsa`; the TTS package lacks 39 others. [constraints.txt](constraints.txt) is the correct tool: pip installs what each package needs, but is forbidden to touch torch (and transformers). `--no-deps` stays on `ntgcalls` alone, which really has no dependencies.
+
+Four things that only bite on a *fresh* machine, all of them fixed above:
+
+- **`setuptools<81`** — newer setuptools dropped `pkg_resources`, which `ctranslate2` imports on startup. Without the pin, speech recognition fails to import and this project reports the misleading `Neither faster-whisper nor openai-whisper is installed`.
+- **`faster-whisper` pinned to 1.1.1 / `ctranslate2` 4.6.0** — 1.2.x pulls ctranslate2 4.8, whose cuDNN clashes with this torch build (`Could not load symbol cudnnGetLibConfig`).
+- **`coqui-tts` instead of `TTS==0.22.0`** — the archived `TTS` package has no wheel for Windows/Python 3.11 and must be compiled, i.e. every user first installs MS Build Tools. `coqui-tts` is the maintained fork, ships a pure-Python wheel, and needs **no compiler**.
+- **transformers `>=4.47,<5`** (in constraints.txt) — coqui-tts needs `isin_mps_friendly`, added in 4.47; transformers 5.x removed it again.
 
 ---
 
@@ -253,19 +263,18 @@ cd p2p-offline-ai-telegram-bridge
 
 ### Step 5 — Install the Python packages, in exactly this order
 
-Order matters. Installing them any other way lets Coqui TTS silently replace your GPU-enabled torch with the CPU version, and nothing will work.
+Order matters. Installing them any other way lets pip replace your GPU-enabled torch with the CPU version, and nothing will work. Unpack the project into a **short path** like `C:\bridge` — torch has very long filenames and a deep path makes the install fail on Windows.
 
 ```bash
-python -m pip install --upgrade pip setuptools wheel
+python -m pip install --upgrade pip "setuptools<81" wheel
 pip install torch==2.5.1+cu121 torchaudio==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
 pip install ntgcalls==2.1.0 --no-deps
-pip install "Telethon>=1.36.0,<2.0.0" cryptg --no-deps
-pip install "faster-whisper>=1.0.0,<2.0.0" "numpy>=1.26.0,<2.0.0" "scipy>=1.13.0,<2.0.0" "soundfile>=0.12.1,<1.0.0"
-pip install transformers==4.46.3
-pip install TTS==0.22.0 --no-deps
+pip install -c constraints.txt "Telethon>=1.36.0,<2.0.0" cryptg
+pip install -c constraints.txt "faster-whisper==1.1.1" "ctranslate2==4.6.0" "numpy>=1.26.0,<2.0.0" "scipy>=1.13.0,<2.0.0" "soundfile>=0.12.1,<1.0.0"
+pip install -c constraints.txt coqui-tts
 ```
 
-Pin `transformers==4.46.3` — a newer version makes XTTS crash with `'int' object has no attribute 'device'`.
+`constraints.txt` comes with the repository — it stops pip from replacing torch while it resolves the other packages. **No C++ compiler is needed**; the exact commands above were run on a clean machine and produced working speech.
 
 ### Step 6 — Install Ollama and pull a model
 

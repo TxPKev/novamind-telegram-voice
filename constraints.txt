@@ -1,0 +1,13 @@
+# Passed to every pip install in the README as: -c constraints.txt
+#
+# Purpose: pip must never be allowed to "helpfully" replace these while
+# resolving another package's dependencies.
+#   - torch/torchaudio: any CPU build silently kills GPU inference. This is the
+#     real reason the original install used --no-deps everywhere; a constraints
+#     file does the same job without stripping the dependencies a package
+#     actually needs.
+#   - transformers: coqui-tts needs >= 4.47 (isin_mps_friendly), and 5.x removed
+#     that symbol again. Unconstrained, pip installs 5.x and TTS fails to import.
+torch==2.5.1+cu121
+torchaudio==2.5.1+cu121
+transformers>=4.47,<5

@@ -354,11 +354,11 @@ class XTTSStreamer:
         """
         Generator yielding float32 numpy audio at 24kHz.
 
-        NOTE: XTTS `inference_stream()` is broken with transformers >= ~4.40
-        (its custom stream generator raises "'int' object has no attribute
-        'device'"). We use the non-streaming `inference()` instead - it works
-        with the pinned transformers 4.46.3 and returns the full utterance,
-        which the outbound loop then paces into 10 ms frames.
+        NOTE: XTTS `inference_stream()` raises "'int' object has no attribute
+        'device'" on TTS 0.22.0 / transformers 4.46.3. We use the non-streaming
+        `inference()` instead: it returns the full utterance, which the outbound
+        loop paces into 10 ms frames anyway, and it works on both that pairing
+        and the current coqui-tts install (see README "Install").
         """
         log.info("[TTS] Synthesising: %r", text[:80])
         syn = self._tts.synthesizer

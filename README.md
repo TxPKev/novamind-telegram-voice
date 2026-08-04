@@ -164,7 +164,9 @@ pip install -c constraints.txt "faster-whisper==1.1.1" "ctranslate2==4.6.0" \
 pip install -c constraints.txt coqui-tts==0.27.5
 ```
 
-**Why `constraints.txt` and not `--no-deps` everywhere.** The danger is real: installing a speech package without care lets pip resolve a CPU torch over your CUDA build and GPU inference dies silently. `--no-deps` prevents that — but it also strips the dependencies a package genuinely needs. Telethon then lacks `pyaes` and `rsa`; the TTS package lacks 39 others. [constraints.txt](constraints.txt) is the correct tool: pip installs what each package needs, but is forbidden to touch torch (and transformers). `--no-deps` stays on `ntgcalls` alone, which really has no dependencies.
+**Why `constraints.txt` and not `--no-deps` everywhere.** `--no-deps` was originally used to stop pip resolving a CPU torch over the CUDA build — a real danger, but the wrong tool: it also strips the dependencies a package genuinely needs. Telethon then lacks `pyaes` and `rsa`; the archived `TTS` package lacked 39 others.
+
+`coqui-tts` 0.27.5 no longer declares PyTorch as a dependency at all (that changed in 0.27.4), but it does declare `transformers`, `numpy` and `scipy` — and pip is free to move those while resolving. Each one breaks something here if it moves: transformers 5.x removed `isin_mps_friendly`, numpy 2.x breaks the pinned ctranslate2. [constraints.txt](constraints.txt) lets pip install what every package genuinely needs while forbidding it to touch these. torch and torchaudio stay in the list as a safety net for older or future versions that do declare them. `--no-deps` remains on `ntgcalls` alone, which really has no dependencies.
 
 Four things that only bite on a *fresh* machine, all of them fixed above:
 

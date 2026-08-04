@@ -2,10 +2,10 @@
 #
 # Purpose: pip must never be allowed to "helpfully" replace these while
 # resolving another package's dependencies.
-#   - torch/torchaudio: any CPU build silently kills GPU inference. This is the
-#     real reason the original install used --no-deps everywhere; a constraints
-#     file does the same job without stripping the dependencies a package
-#     actually needs.
+#   - torch/torchaudio: a safety net. coqui-tts 0.27.5 no longer declares torch
+#     (that changed in 0.27.4), but older and future versions may, and any CPU
+#     build silently kills GPU inference. This is what --no-deps used to guard
+#     against, without stripping dependencies a package actually needs.
 #   - transformers: coqui-tts needs >= 4.47 (isin_mps_friendly), and 5.x removed
 #     that symbol again. Unconstrained, pip installs 5.x and TTS fails to import.
 #   - numpy/scipy: they are installed with a 1.x pin earlier in the sequence, but

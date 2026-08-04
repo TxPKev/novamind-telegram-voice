@@ -1,36 +1,41 @@
 --extra-index-url https://download.pytorch.org/whl/cu121
 
-# Verified on a clean Windows venv (Python 3.11) — see README "Install".
-# Do NOT `pip install -r` this on its own: torch must be installed FIRST from
-# the cu121 index, otherwise pip resolves a CPU torch and GPU inference dies.
-# Use the step-by-step install in the README, with constraints.txt.
+# Exact versions verified end to end on a clean Windows / Python 3.11 machine:
+# fresh venv -> these packages -> bridge imports, Whisper loads on CUDA, XTTS
+# produces audio. No C++ compiler involved.
+#
+# INSTALL ORDER MATTERS — follow the step-by-step commands in the README and
+# pass -c constraints.txt. torch must come from the cu121 index FIRST; if pip
+# resolves a CPU torch instead, GPU inference dies silently.
+# This file is the record of what the working environment contains.
 
 # setuptools >= 81 dropped pkg_resources, which ctranslate2 imports at startup.
 setuptools<81
 
-Telethon>=1.36.0,<2.0.0
-cryptg>=0.4.0,<1.0.0
-
-ntgcalls==2.1.0
-
 torch==2.5.1+cu121
 torchaudio==2.5.1+cu121
 
-# Pinned, not ranged: faster-whisper 1.2.x pulls ctranslate2 4.8, which loads a
-# cuDNN that clashes with this torch build ("Could not load symbol
-# cudnnGetLibConfig"). 1.1.1 / 4.6.0 is the combination that works.
+ntgcalls==2.1.0
+
+Telethon==1.44.0
+cryptg==0.6.0
+
+# Pinned, not ranged: faster-whisper 1.2.x pulls ctranslate2 4.8, whose cuDNN
+# clashes with this torch build ("Could not load symbol cudnnGetLibConfig").
 faster-whisper==1.1.1
 ctranslate2==4.6.0
 
-# coqui-tts is the maintained fork of the (archived) TTS package. It ships a
-# pure-Python wheel, so no C++ compiler is needed. TTS==0.22.0 has no wheel at
-# all and forces every Windows user to install MS Build Tools first.
-coqui-tts
+# coqui-tts is the maintained fork of the archived TTS package. It ships a
+# pure-Python wheel, so no C++ compiler is needed. TTS==0.22.0 has no wheel for
+# Windows/Python 3.11 at all and forces every user to install MS Build Tools.
+coqui-tts==0.27.5
 
 # coqui-tts needs isin_mps_friendly (transformers >= 4.47); transformers 5.x
-# removed it again. Anything in the 4.47-4.x range works.
-transformers>=4.47,<5
+# removed it again. 4.57.6 is the version this was verified with.
+transformers==4.57.6
+tokenizers==0.22.2
 
-numpy>=1.26.0,<2.0.0
-scipy>=1.13.0,<2.0.0
-soundfile>=0.12.1,<1.0.0
+# numpy must stay on 1.x — ctranslate2 breaks on 2.x.
+numpy==1.26.4
+scipy==1.17.1
+soundfile==0.14.0

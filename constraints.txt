@@ -8,6 +8,12 @@
 #     actually needs.
 #   - transformers: coqui-tts needs >= 4.47 (isin_mps_friendly), and 5.x removed
 #     that symbol again. Unconstrained, pip installs 5.x and TTS fails to import.
+#   - numpy/scipy: they are installed with a 1.x pin earlier in the sequence, but
+#     coqui-tts brings its own numpy requirement. Without them listed here, pip
+#     is free to lift numpy to 2.x while resolving it — and ctranslate2 (speech
+#     recognition) is the first thing to break when that happens.
 torch==2.5.1+cu121
 torchaudio==2.5.1+cu121
 transformers>=4.47,<5
+numpy>=1.26.0,<2.0.0
+scipy>=1.13.0,<2.0.0

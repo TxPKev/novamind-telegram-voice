@@ -142,6 +142,8 @@ Also arm `faulthandler` inside the child and point it at a file. A native fault 
 
 ## Install
 
+> ⚠️ **Install this into a fresh, dedicated virtual environment.** Do not run these commands inside an existing environment that already has a working XTTS setup. They move `transformers` and replace the TTS package — a voice tuned and A/B-tested against `TTS==0.22.0` + `transformers==4.46.3` will not sound identical afterwards, and any stored voice parameters become meaningless. This bridge is standalone; give it its own venv.
+
 **The install order matters, and the steps below are the ones that were actually run on a clean machine.** Follow them in order.
 
 Put the project in a **short path** (e.g. `C:\bridge`). Torch ships files with very long names; installed under a deep path, Windows aborts with `No such file or directory: ...torch\include\ATen\ops\...`.
@@ -159,7 +161,7 @@ pip install -c constraints.txt "Telethon>=1.36.0,<2.0.0" cryptg
 pip install -c constraints.txt "faster-whisper==1.1.1" "ctranslate2==4.6.0" \
     "numpy>=1.26.0,<2.0.0" "scipy>=1.13.0,<2.0.0" "soundfile>=0.12.1,<1.0.0"
 
-pip install -c constraints.txt coqui-tts
+pip install -c constraints.txt coqui-tts==0.27.5
 ```
 
 **Why `constraints.txt` and not `--no-deps` everywhere.** The danger is real: installing a speech package without care lets pip resolve a CPU torch over your CUDA build and GPU inference dies silently. `--no-deps` prevents that — but it also strips the dependencies a package genuinely needs. Telethon then lacks `pyaes` and `rsa`; the TTS package lacks 39 others. [constraints.txt](constraints.txt) is the correct tool: pip installs what each package needs, but is forbidden to touch torch (and transformers). `--no-deps` stays on `ntgcalls` alone, which really has no dependencies.
@@ -168,7 +170,7 @@ Four things that only bite on a *fresh* machine, all of them fixed above:
 
 - **`setuptools<81`** — newer setuptools dropped `pkg_resources`, which `ctranslate2` imports on startup. Without the pin, speech recognition fails to import and this project reports the misleading `Neither faster-whisper nor openai-whisper is installed`.
 - **`faster-whisper` pinned to 1.1.1 / `ctranslate2` 4.6.0** — 1.2.x pulls ctranslate2 4.8, whose cuDNN clashes with this torch build (`Could not load symbol cudnnGetLibConfig`).
-- **`coqui-tts` instead of `TTS==0.22.0`** — the archived `TTS` package has no wheel for Windows/Python 3.11 and must be compiled, i.e. every user first installs MS Build Tools. `coqui-tts` is the maintained fork, ships a pure-Python wheel, and needs **no compiler**.
+- **`coqui-tts==0.27.5` instead of `TTS==0.22.0`** — the archived `TTS` package has no wheel for Windows/Python 3.11, and its dependency `pyworld` has to be built from source, so every user first had to install MS Build Tools. `coqui-tts` is the maintained fork; it does not pull `pyworld` at all (verified: absent from the working environment), and every remaining dependency installs from a wheel. **No compiler is needed** — that is not a workaround, the requirement is gone.
 - **transformers `>=4.47,<5`** (in constraints.txt) — coqui-tts needs `isin_mps_friendly`, added in 4.47; transformers 5.x removed it again.
 
 ---
@@ -265,13 +267,20 @@ cd p2p-offline-ai-telegram-bridge
 
 Order matters. Installing them any other way lets pip replace your GPU-enabled torch with the CPU version, and nothing will work. Unpack the project into a **short path** like `C:\bridge` — torch has very long filenames and a deep path makes the install fail on Windows.
 
+Create a **fresh virtual environment for the bridge** and install into that one — never into an environment that already runs a tuned XTTS setup (these packages change how XTTS sounds):
+
+```bash
+python -m venv venv
+venv\Scripts\activate
+```
+
 ```bash
 python -m pip install --upgrade pip "setuptools<81" wheel
 pip install torch==2.5.1+cu121 torchaudio==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
 pip install ntgcalls==2.1.0 --no-deps
 pip install -c constraints.txt "Telethon>=1.36.0,<2.0.0" cryptg
 pip install -c constraints.txt "faster-whisper==1.1.1" "ctranslate2==4.6.0" "numpy>=1.26.0,<2.0.0" "scipy>=1.13.0,<2.0.0" "soundfile>=0.12.1,<1.0.0"
-pip install -c constraints.txt coqui-tts
+pip install -c constraints.txt coqui-tts==0.27.5
 ```
 
 `constraints.txt` comes with the repository — it stops pip from replacing torch while it resolves the other packages. **No C++ compiler is needed**; the exact commands above were run on a clean machine and produced working speech.
